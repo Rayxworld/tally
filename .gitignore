@@ -1,0 +1,22 @@
+/target/
+
+# Local configuration and runtime data
+tally.config.json
+tally.history.json
+*.history.json
+
+# Python GUI environment and cache
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+# IDE and operating system files
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
+
+# Temporary files
+*.tmp
+*.log
