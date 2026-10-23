@@ -20,3 +20,6 @@ Thumbs.db
 # Temporary files
 *.tmp
 *.log
+
+# Generated Windows installer binaries
+/installer-output/
