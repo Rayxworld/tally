@@ -52,6 +52,22 @@ Do not create a release from an old commit: the version tag must point to the
 commit containing the release changes. Publishing a GitHub Release alone does
 not make the app automatically update itself.
 
+## Website
+
+The static landing page is in [`website/`](./website/). It links visitors to
+the latest GitHub Release. To preview it locally:
+
+```powershell
+cd website
+python -m http.server 8000
+```
+
+Open `http://localhost:8000`. The GitHub Actions workflow deploys changes in
+`website/` to GitHub Pages when they are pushed to `main`. Enable Pages for the
+repository in **Settings → Pages**, with **GitHub Actions** as the build and
+deployment source. GitHub displays the published site URL in the Pages settings
+and in the completed deployment workflow.
+
 ## Desktop shortcuts
 
 | Shortcut | Action |
