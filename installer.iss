@@ -1,36 +1,58 @@
-﻿#define MyAppName "Tally"
-#define MyAppVersion "0.1.0"
+#define MyAppName      "Tally"
+#define MyAppVersion   "1.0.0"
 #define MyAppPublisher "Rayxworld"
-#define MyAppURL "https://github.com/Rayxworld/tally"
-#define MyAppExeName "tally.exe"
+#define MyAppURL       "https://github.com/Rayxworld/tally"
+#define MyAppExeName   "tally.exe"
+#define MyGuiExeName   "Tally.exe"
 
 [Setup]
 AppId={{B74B1D36-9B6D-4B7C-9E1A-3A9C8F4B12D7}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
+AppVerName={#MyAppName} {#MyAppVersion}
 AppPublisher={#MyAppPublisher}
 AppPublisherURL={#MyAppURL}
 AppSupportURL={#MyAppURL}
 AppUpdatesURL={#MyAppURL}
+SetupIconFile=assets\Minimalist TALLY Tech Logo.ico
 DefaultDirName={autopf}\Tally
 DefaultGroupName=Tally
 DisableProgramGroupPage=yes
-UninstallDisplayIcon={app}\{#MyAppExeName}
+UninstallDisplayIcon={app}\{#MyGuiExeName}
 OutputDir=installer-output
-OutputBaseFilename=Tally-Setup-0.1.0
+OutputBaseFilename=Tally-Setup-{#MyAppVersion}
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
 PrivilegesRequired=admin
 ChangesEnvironment=yes
 CloseApplications=no
+; Minimum Windows 10
+MinVersion=10.0.17763
+
+[Languages]
+Name: "english"; MessagesFile: "compiler:Default.isl"
+
+[Tasks]
+Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Additional icons:"; Flags: unchecked
 
 [Files]
-Source: "target\release\tally.exe"; DestDir: "{app}"; Flags: ignoreversion
+; CLI binary
+Source: "target\release\tally.exe";         DestDir: "{app}"; Flags: ignoreversion
+; Full Tauri/React desktop UI (built by `npm run tauri build` in desktop-ui)
+Source: "desktop-ui\src-tauri\target\release\Tally.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "desktop-ui\src-tauri\target\release\*.dll"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs skipifsourcedoesntexist
 
 [Icons]
-Name: "{group}\Tally Command Guide"; Filename: "{cmd}"; Parameters: "/k ""echo Tally installed. Run tally --help to see available commands."""
-Name: "{group}\Uninstall Tally"; Filename: "{uninstallexe}"
+; Start Menu
+Name: "{group}\Tally";                Filename: "{app}\{#MyGuiExeName}"; Comment: "Open the Tally file organizer"
+Name: "{group}\Tally (CLI Help)";     Filename: "{cmd}"; Parameters: "/k ""{app}\tally.exe --help"""; Comment: "Show CLI commands"
+Name: "{group}\Uninstall Tally";      Filename: "{uninstallexe}"
+; Desktop (optional task)
+Name: "{commondesktop}\Tally";        Filename: "{app}\{#MyGuiExeName}"; Tasks: desktopicon
+
+[Run]
+Filename: "{app}\{#MyGuiExeName}"; Description: "Launch Tally now"; Flags: nowait postinstall skipifsilent
 
 [Code]
 const

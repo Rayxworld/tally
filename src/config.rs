@@ -1,5 +1,5 @@
 
- //! Configuration: routing rules, skip lists, and known-folder resolution.
+//! Configuration: routing rules, skip lists, and known-folder resolution.
 
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -65,7 +65,13 @@ fn default_skip_extensions() -> Vec<String> {
 }
 
 fn default_skip_names() -> Vec<String> {
-    strings(&[".env", "config.local", "desktop.ini", ".DS_Store", "Thumbs.db"])
+    strings(&[
+        ".env",
+        "config.local",
+        "desktop.ini",
+        ".DS_Store",
+        "Thumbs.db",
+    ])
 }
 
 fn rule(name: &str, destination: &str, exts: &[&str]) -> Rule {
@@ -82,20 +88,27 @@ fn default_rules() -> Vec<Rule> {
             "Documents",
             "{documents}",
             &[
-                ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".txt", ".md",
-                ".rtf", ".odt", ".ods", ".odp",
+                ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".txt", ".md", ".rtf",
+                ".odt", ".ods", ".odp",
             ],
         ),
         rule(
             "Pictures",
             "{pictures}",
             &[
-                ".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".bmp", ".heic", ".ai",
-                ".psd",
+                ".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".bmp", ".heic", ".ai", ".psd",
             ],
         ),
-        rule("Videos", "{videos}", &[".mp4", ".mov", ".avi", ".mkv", ".webm", ".wmv"]),
-        rule("Music", "{music}", &[".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg"]),
+        rule(
+            "Videos",
+            "{videos}",
+            &[".mp4", ".mov", ".avi", ".mkv", ".webm", ".wmv"],
+        ),
+        rule(
+            "Music",
+            "{music}",
+            &[".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg"],
+        ),
         rule(
             "Data",
             "{documents}/Data",
@@ -112,7 +125,9 @@ fn default_rules() -> Vec<Rule> {
         rule(
             "Installers",
             "{documents}/Installers",
-            &[".exe", ".msi", ".dmg", ".pkg", ".deb", ".rpm", ".iso", ".apk"],
+            &[
+                ".exe", ".msi", ".dmg", ".pkg", ".deb", ".rpm", ".iso", ".apk",
+            ],
         ),
         rule(
             "Archives",
@@ -161,8 +176,7 @@ impl Config {
             ));
         }
 
-        if self.duplicates_folder.trim().is_empty()
-            || self.duplicates_folder.contains(['/', '\\'])
+        if self.duplicates_folder.trim().is_empty() || self.duplicates_folder.contains(['/', '\\'])
         {
             return Err("duplicates_folder must be a single folder name".to_string());
         }
@@ -220,16 +234,24 @@ impl KnownDirs {
     pub fn detect() -> KnownDirs {
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
 
-        let pick = |found: Option<PathBuf>, fallback: &str| {
-            found.unwrap_or_else(|| home.join(fallback))
-        };
+        let pick =
+            |found: Option<PathBuf>, fallback: &str| found.unwrap_or_else(|| home.join(fallback));
 
         let mut map = HashMap::new();
-        map.insert("documents".to_string(), pick(dirs::document_dir(), "Documents"));
-        map.insert("pictures".to_string(), pick(dirs::picture_dir(), "Pictures"));
+        map.insert(
+            "documents".to_string(),
+            pick(dirs::document_dir(), "Documents"),
+        );
+        map.insert(
+            "pictures".to_string(),
+            pick(dirs::picture_dir(), "Pictures"),
+        );
         map.insert("videos".to_string(), pick(dirs::video_dir(), "Videos"));
         map.insert("music".to_string(), pick(dirs::audio_dir(), "Music"));
-        map.insert("downloads".to_string(), pick(dirs::download_dir(), "Downloads"));
+        map.insert(
+            "downloads".to_string(),
+            pick(dirs::download_dir(), "Downloads"),
+        );
         map.insert("desktop".to_string(), pick(dirs::desktop_dir(), "Desktop"));
         map.insert("home".to_string(), home);
 
@@ -241,26 +263,64 @@ impl KnownDirs {
         KnownDirs { map }
     }
 
-    fn get(&self, name: &str) -> Result<String, String> {
-        self.map
-            .get(name)
-            .and_then(|p| p.to_str())
-            .map(String::from)
-            .ok_or_else(|| format!("unknown or non-UTF-8 folder token '{{{name}}}'"))
+    fn get(&self, name: &str, time: std::time::SystemTime) -> Result<String, String> {
+        let (y, m, d) = crate::util::date_parts(time);
+        const MONTH_NAMES: [&str; 12] = [
+            "January",
+            "February",
+            "March",
+            "April",
+            "May",
+            "June",
+            "July",
+            "August",
+            "September",
+            "October",
+            "November",
+            "December",
+        ];
+
+        match name {
+            "yyyy" => Ok(format!("{y:04}")),
+            "yy" => Ok(format!("{:02}", y.abs() % 100)),
+            "mm" => Ok(format!("{m:02}")),
+            "month" => Ok(MONTH_NAMES
+                .get((m as usize).saturating_sub(1))
+                .unwrap_or(&"Unknown")
+                .to_string()),
+            "dd" => Ok(format!("{d:02}")),
+            "date" => Ok(format!("{y:04}-{m:02}-{d:02}")),
+            _ => self
+                .map
+                .get(name)
+                .and_then(|p| p.to_str())
+                .map(String::from)
+                .ok_or_else(|| format!("unknown or non-UTF-8 folder token '{{{name}}}'")),
+        }
     }
 
     /// Expand "~" and {tokens} into an absolute path.
     pub fn expand(&self, raw: &str) -> Result<PathBuf, String> {
+        self.expand_with_time(raw, None)
+    }
+
+    /// Expand "~", folder tokens, and date tokens like {YYYY}, {MM} using a reference timestamp.
+    pub fn expand_with_time(
+        &self,
+        raw: &str,
+        time: Option<std::time::SystemTime>,
+    ) -> Result<PathBuf, String> {
         let raw = raw.trim();
 
         if raw.is_empty() {
             return Err("empty path".to_string());
         }
 
+        let ref_time = time.unwrap_or_else(std::time::SystemTime::now);
         let mut s = raw.to_string();
 
         if s == "~" || s.starts_with("~/") || s.starts_with("~\\") {
-            let home = self.get("home")?;
+            let home = self.get("home", ref_time)?;
             s = format!("{home}{}", &s[1..]);
         }
 
@@ -276,7 +336,7 @@ impl KnownDirs {
                 .ok_or_else(|| format!("unclosed '{{' in path '{raw}'"))?;
 
             let token = after[..end].to_lowercase();
-            out.push_str(&self.get(&token)?);
+            out.push_str(&self.get(&token, ref_time)?);
             rest = &after[end + 1..];
         }
 
@@ -320,21 +380,33 @@ mod tests {
 
         assert_eq!(
             k.expand("{documents}/Data").unwrap(),
-            std::env::temp_dir()
-                .join("tally-test-docs")
-                .join("Data")
+            std::env::temp_dir().join("tally-test-docs").join("Data")
         );
 
         assert_eq!(
             k.expand("~/x").unwrap(),
-            std::env::temp_dir()
-                .join("tally-test-home")
-                .join("x")
+            std::env::temp_dir().join("tally-test-home").join("x")
         );
 
         assert!(k.expand("{nope}").is_err());
         assert!(k.expand("relative/path").is_err());
         assert!(k.expand("{documents").is_err());
+    }
+
+    #[test]
+    fn expands_date_tokens() {
+        let k = dirs_for_test();
+        let time = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_792_674_000); // 2026-10-22
+        let path = k
+            .expand_with_time("{documents}/{YYYY}/{MM}", Some(time))
+            .unwrap();
+        assert_eq!(
+            path,
+            std::env::temp_dir()
+                .join("tally-test-docs")
+                .join("2026")
+                .join("10")
+        );
     }
 
     #[test]

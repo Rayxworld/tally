@@ -5,7 +5,7 @@ use crate::util::move_file;
 use std::fs;
 use std::path::PathBuf;
 
-#[derive(Debug, Default, PartialEq)]
+#[derive(Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct UndoSummary {
     pub restored: usize,
     pub missing: usize,
@@ -52,7 +52,11 @@ pub fn undo(ledger: &Ledger, count: usize, dry_run: bool) -> Result<UndoSummary,
                 continue;
             }
             if dry_run {
-                println!("[dry-run] would restore {} -> {}", from.display(), to.display());
+                println!(
+                    "[dry-run] would restore {} -> {}",
+                    from.display(),
+                    to.display()
+                );
                 summary.restored += 1;
                 continue;
             }
@@ -89,7 +93,9 @@ pub fn undo(ledger: &Ledger, count: usize, dry_run: bool) -> Result<UndoSummary,
             retained.reverse(); // back to original order
             tx.operations = retained;
             txs.push(tx);
-            println!("Some files could not be restored; this transaction was kept so you can retry.");
+            println!(
+                "Some files could not be restored; this transaction was kept so you can retry."
+            );
             break;
         }
     }

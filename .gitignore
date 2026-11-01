@@ -1,4 +1,7 @@
 /target/
+/desktop-ui/dist/
+/desktop-ui/src-tauri/target/
+/desktop-ui/node_modules/
 
 # Local configuration and runtime data
 tally.config.json
@@ -23,3 +26,14 @@ Thumbs.db
 
 # Generated Windows installer binaries
 /installer-output/
+
+# Release artifacts and local Tally state
+*.msi
+*.exe
+!assets/*.ico
+!assets/*.png
+watched_folders.json
+file_tags.json
+transactions.jsonl
+.tauri/
+*.key

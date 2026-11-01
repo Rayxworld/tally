@@ -49,6 +49,17 @@ pub fn move_file(src: &Path, dst: &Path) -> io::Result<()> {
             format!("copy verification failed (rename error was: {rename_err})"),
         ));
     }
+    // If src is marked read-only on Windows, fs::remove_file will fail with AccessDenied.
+    // Ensure write permission before removal.
+    if let Ok(metadata) = fs::metadata(src) {
+        let mut permissions = metadata.permissions();
+        if permissions.readonly() {
+            #[allow(clippy::permissions_set_readonly_false)]
+            permissions.set_readonly(false);
+            let _ = fs::set_permissions(src, permissions);
+        }
+    }
+
     if let Err(e) = fs::remove_file(src) {
         let _ = fs::remove_file(dst);
         return Err(io::Error::new(
@@ -62,7 +73,7 @@ pub fn move_file(src: &Path, dst: &Path) -> io::Result<()> {
 /// Split "report.final.pdf" into ("report.final", ".pdf"). Handles .tar.gz style names.
 pub fn split_name(name: &str) -> (&str, &str) {
     let lower = name.to_lowercase();
-    for compound in [".tar.gz", ".tar.bz2", ".tar.xz"] {
+    for compound in [".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst"] {
         if lower.ends_with(compound) && name.len() > compound.len() {
             let cut = name.len() - compound.len();
             return (&name[..cut], &name[cut..]);
@@ -78,6 +89,17 @@ pub fn split_name(name: &str) -> (&str, &str) {
 pub fn numbered_name(name: &str, n: u32) -> String {
     let (stem, ext) = split_name(name);
     format!("{stem} ({n}){ext}")
+}
+
+/// Known multi-part extensions like ".tar.gz", ".tar.bz2".
+pub fn compound_extension_of(name: &str) -> Option<String> {
+    let lower = name.to_lowercase();
+    for compound in [".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst"] {
+        if lower.ends_with(compound) && name.len() > compound.len() {
+            return Some(compound.to_string());
+        }
+    }
+    None
 }
 
 /// Lowercased extension including the dot, e.g. ".pdf". None if there is no extension.
@@ -108,6 +130,12 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
     let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
     (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+pub fn date_parts(t: SystemTime) -> (i64, u32, u32) {
+    let (secs, _) = unix_parts(t);
+    let days = secs.div_euclid(86_400);
+    civil_from_days(days)
 }
 
 fn parts(t: SystemTime) -> (i64, u32, u32, u32, u32, u32, u32) {

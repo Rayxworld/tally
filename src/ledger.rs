@@ -45,7 +45,11 @@ impl Ledger {
                 continue;
             }
             let tx: Transaction = serde_json::from_str(line).map_err(|e| {
-                format!("ledger {} is corrupt at line {}: {e}", self.path.display(), i + 1)
+                format!(
+                    "ledger {} is corrupt at line {}: {e}",
+                    self.path.display(),
+                    i + 1
+                )
             })?;
             out.push(tx);
         }
@@ -54,16 +58,19 @@ impl Ledger {
 
     pub fn append(&self, tx: &Transaction) -> Result<(), String> {
         if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent).map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
         }
-        let line = serde_json::to_string(tx).map_err(|e| format!("cannot encode transaction: {e}"))?;
+        let line =
+            serde_json::to_string(tx).map_err(|e| format!("cannot encode transaction: {e}"))?;
         let mut file = OpenOptions::new()
             .create(true)
             .append(true)
             .open(&self.path)
             .map_err(|e| format!("cannot open ledger {}: {e}", self.path.display()))?;
         writeln!(file, "{line}").map_err(|e| format!("cannot write ledger: {e}"))?;
-        file.sync_all().map_err(|e| format!("cannot flush ledger: {e}"))
+        file.sync_all()
+            .map_err(|e| format!("cannot flush ledger: {e}"))
     }
 
     /// Replace the whole ledger (used after undo). Writes a temp file, then renames it.

@@ -1,14 +1,14 @@
 //! End-to-end tests using real temporary folders.
 
-use crate::config::{Config, KnownDirs};
-use crate::ledger::Ledger;
-use crate::sweep::{sweep, Summary, SweepOptions};
-use crate::undo::undo;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime};
+use tally::config::{Config, KnownDirs};
+use tally::ledger::Ledger;
+use tally::sweep::{sweep, Summary, SweepOptions};
+use tally::undo::undo;
 
 static COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -28,7 +28,14 @@ impl Env {
         let inbox = root.join("inbox");
         fs::create_dir_all(&inbox).unwrap();
         let mut map = HashMap::new();
-        for name in ["documents", "pictures", "videos", "music", "downloads", "desktop"] {
+        for name in [
+            "documents",
+            "pictures",
+            "videos",
+            "music",
+            "downloads",
+            "desktop",
+        ] {
             map.insert(name.to_string(), root.join(name));
         }
         map.insert("home".to_string(), root.clone());
@@ -36,7 +43,13 @@ impl Env {
         cfg.min_age_seconds = 0;
         cfg.validate().unwrap();
         let ledger = Ledger::new(root.join("home").join("transactions.jsonl"));
-        Env { root, inbox, known: KnownDirs::from_map(map), cfg, ledger }
+        Env {
+            root,
+            inbox,
+            known: KnownDirs::from_map(map),
+            cfg,
+            ledger,
+        }
     }
 
     fn write(&self, rel: &str, content: &str) -> PathBuf {
@@ -125,8 +138,14 @@ fn different_content_gets_a_numbered_name() {
     fs::write(e.path("documents/report.pdf"), "OLD").unwrap();
     e.write("report.pdf", "NEW");
     e.run(false);
-    assert_eq!(fs::read_to_string(e.path("documents/report.pdf")).unwrap(), "OLD");
-    assert_eq!(fs::read_to_string(e.path("documents/report (1).pdf")).unwrap(), "NEW");
+    assert_eq!(
+        fs::read_to_string(e.path("documents/report.pdf")).unwrap(),
+        "OLD"
+    );
+    assert_eq!(
+        fs::read_to_string(e.path("documents/report (1).pdf")).unwrap(),
+        "NEW"
+    );
 }
 
 #[test]
@@ -138,7 +157,10 @@ fn identical_content_is_set_aside_not_deleted() {
     let s = e.run(false);
     assert_eq!(s.duplicates, 1);
     assert!(!exists(&e.inbox.join("report.pdf")));
-    assert_eq!(fs::read_to_string(e.path("documents/_Duplicates/report.pdf")).unwrap(), "SAME");
+    assert_eq!(
+        fs::read_to_string(e.path("documents/_Duplicates/report.pdf")).unwrap(),
+        "SAME"
+    );
 }
 
 #[test]
@@ -167,7 +189,10 @@ fn undo_restores_files_and_removes_created_folders() {
     assert_eq!(s.restored, 2);
     assert_eq!(fs::read_to_string(e.inbox.join("a.pdf")).unwrap(), "A");
     assert!(exists(&e.inbox.join("tool.exe")));
-    assert!(!exists(&e.path("documents")), "folders created by Tally should be removed");
+    assert!(
+        !exists(&e.path("documents")),
+        "folders created by Tally should be removed"
+    );
     assert!(e.ledger.load().unwrap().is_empty());
 }
 
@@ -181,7 +206,10 @@ fn undo_never_overwrites_and_keeps_transaction_for_retry() {
     let s = undo(&e.ledger, 1, false).unwrap();
     assert_eq!(s.failed, 1);
     assert_eq!(fs::read_to_string(e.inbox.join("a.pdf")).unwrap(), "NEWER");
-    assert_eq!(fs::read_to_string(e.path("documents/a.pdf")).unwrap(), "ORIGINAL");
+    assert_eq!(
+        fs::read_to_string(e.path("documents/a.pdf")).unwrap(),
+        "ORIGINAL"
+    );
     assert_eq!(e.ledger.load().unwrap().len(), 1);
 
     // After the user frees the spot, undo succeeds.
@@ -226,13 +254,15 @@ fn does_not_sweep_a_folder_into_itself() {
     assert!(exists(&e.inbox.join("a.pdf")));
 }
 
-
 #[test]
 fn recognized_project_root_is_left_untouched() {
     let e = Env::new();
 
     // Simulate a Rust project in the inbox.
-    e.write("Cargo.toml", "[package]\nname = \"demo\"\nversion = \"0.1.0\"");
+    e.write(
+        "Cargo.toml",
+        "[package]\nname = \"demo\"\nversion = \"0.1.0\"",
+    );
     e.write("main.rs", "fn main() {}");
     e.write("report.pdf", "important document");
 
@@ -250,3 +280,44 @@ fn recognized_project_root_is_left_untouched() {
     assert!(e.ledger.load().unwrap().is_empty());
 }
 
+#[test]
+fn lone_manifest_in_downloads_does_not_block_sorting() {
+    let e = Env::new();
+
+    // User downloaded a sample package.json into downloads along with pictures and documents
+    e.write("package.json", "{\"name\": \"sample\"}");
+    e.write("invoice.pdf", "invoice content");
+    e.write("photo.png", "image data");
+
+    let s = e.run(false);
+
+    // PDF, PNG, and JSON should all be sorted according to their respective rules!
+    assert_eq!(s.moved, 3);
+    assert_eq!(s.failed, 0);
+    assert!(exists(&e.path("documents/invoice.pdf")));
+    assert!(exists(&e.path("pictures/photo.png")));
+    assert!(exists(&e.path("documents/Data/package.json")));
+}
+
+#[test]
+fn date_tokens_in_rules_sort_by_year_and_month() {
+    let mut e = Env::new();
+    e.cfg.rules = vec![tally::config::Rule {
+        name: "DatedPictures".to_string(),
+        destination: "{pictures}/{YYYY}/{MM}".to_string(),
+        extensions: vec![".png".to_string()],
+    }];
+
+    e.write("snap.png", "image");
+    let s = e.run(false);
+    assert_eq!(s.moved, 1);
+    assert_eq!(s.failed, 0);
+
+    let (y, m, _) = tally::util::date_parts(std::time::SystemTime::now());
+    let expected = e.path(&format!("pictures/{y:04}/{m:02}/snap.png"));
+    assert!(
+        exists(&expected),
+        "Expected to find file at {}",
+        expected.display()
+    );
+}

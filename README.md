@@ -1,75 +1,98 @@
 # Tally
 
-Safe, undoable folder organizer. Sorts loose files by type, never overwrites or deletes anything, and can undo.
+Tally is a safe, undoable file inbox for Windows. It keeps Downloads and Desktop clear without deleting or overwriting your files.
 
-## Build
+## Why Tally
 
-1. Install Rust from https://rustup.rs (needs Rust 1.75 or newer).
-2. In this folder run:
+- Preview every organization action before confirming it.
+- Find exact SHA-256 duplicates and recover space safely.
+- See large files and storage categories at a glance.
+- Teach Tally an unfamiliar extension once; it remembers where it belongs.
+- Undo organization, clone moves, and batch renames from History.
+- Watch selected folders with a quiet-period debounce.
 
+## Install
+
+Download `Tally_1.0.0_x64-setup.exe` from the GitHub Release and run it. The Desktop UI includes the file browser, system tray control, command palette, tags, duplicate review, storage visualizer, archive extraction, and batch rename.
+
+## Update Tally
+
+Tally does not currently have an in-app automatic updater. To update an existing
+installation, download the newest `Tally_<version>_x64-setup.exe` from
+[GitHub Releases](https://github.com/Rayxworld/tally/releases), close Tally,
+and run the installer. Install it to the existing location if prompted. Back
+up important files and configuration before upgrading.
+
+## Publish a new version
+
+When a feature or fix is ready to share:
+
+1. Update the version consistently in `Cargo.toml`,
+   `desktop-ui/package.json`, and `desktop-ui/src-tauri/tauri.conf.json`.
+   Update the matching `Cargo.lock` files as needed.
+2. Run the tests and build the Windows installers:
+
+   ```powershell
+   cargo test --all-targets
+   cd desktop-ui
+   npm install
+   npm run build:windows
+   ```
+
+3. Commit and push the changes to `main`.
+4. Create and push a matching version tag (for example, `v1.1.0`) on that
+   commit. On GitHub, create a Release from that tag.
+5. Attach both generated installers from
+   `desktop-ui\src-tauri\target\release\bundle\nsis\` and
+   `desktop-ui\src-tauri\target\release\bundle\msi\`, then publish the release.
+6. Users update by downloading and running the new setup installer; announce
+   the release link to existing users.
+
+Do not create a release from an old commit: the version tag must point to the
+commit containing the release changes. Publishing a GitHub Release alone does
+not make the app automatically update itself.
+
+## Desktop shortcuts
+
+| Shortcut | Action |
+| --- | --- |
+| `Ctrl + K` | Open Command Palette |
+| `Ctrl + /` | Open Help & Shortcuts |
+| `Esc` | Close menus and dialogs |
+| `Ctrl + click` | Add/remove an item from selection |
+| `Shift + click` | Select a range |
+
+Right-click an unrecognized file and choose **Teach Tally this type** to create a saved routing rule.
+
+## Build a Windows release
+
+```powershell
+cd desktop-ui
+npm install
+npm run build:windows
 ```
-cargo build --release
+
+Upload this installer to GitHub Releases:
+
+```text
+desktop-ui\src-tauri\target\release\bundle\nsis\Tally_1.0.0_x64-setup.exe
+desktop-ui\src-tauri\target\release\bundle\msi\Tally_1.0.0_x64_en-US.msi
 ```
 
-The program is created at `target/release/tally` (`target\release\tally.exe` on Windows).
+## Command line
 
-## Test
-
-```
-cargo test
-```
-
-## Use
-
-Always preview first:
-
-```
-tally --sweep ~/Downloads --dry-run
+```powershell
+cargo build --release --bin tally
+.\target\release\tally.exe --sweep $HOME\Downloads --dry-run
+.\target\release\tally.exe --stats $HOME\Downloads
+.\target\release\tally.exe --watch $HOME\Downloads
+.\target\release\tally.exe --undo
 ```
 
-If the plan looks right, run it for real:
+## Safety
 
-```
-tally --sweep ~/Downloads
-```
-
-Changed your mind:
-
-```
-tally --undo          # reverse the last sweep
-tally --undo 3        # reverse the last 3 sweeps
-tally --undo --dry-run
-tally --history
-```
-
-Windows PowerShell example: `.\target\release\tally.exe --sweep $HOME\Downloads --dry-run`
-
-## Configure (optional)
-
-```
-tally --init-config     # writes the default config and prints where it is
-tally --show-config
-```
-
-Edit the file, then run a `--dry-run` to check your changes. See SPEC.md section 9 for every option.
-
-Config and history live in your OS config folder under `tally/`. Set the `TALLY_HOME` environment variable to change that.
-
-## Safety summary
-
-- Only top-level files in the folder you name are touched. Sub-folders are never entered or moved.
-- Hidden files, shortcuts, partial downloads, `.env`, and files changed in the last 10 seconds are skipped.
-- Name collisions get `(1)`, `(2)` suffixes. Identical copies go to `_Duplicates/`, not the bin.
-- Undo never overwrites; if a spot is taken it tells you and keeps the record so you can retry.
-
-## Project layout
-
-```
-src/main.rs     command-line parsing and wiring
-src/config.rs   config file, defaults, folder tokens
-src/sweep.rs    routing, collision handling, moving
-src/undo.rs     reversing sweeps
-src/ledger.rs   history file (JSON Lines)
-src/util.rs     hashing, safe move, names, timestamps
-src/tests.rs    end-to-end tests
-```
+- Only top-level files in the chosen folder are organized.
+- Tally skips hidden files, shortcuts, partial downloads, and very recent files.
+- Name collisions receive a numbered name; Tally never overwrites an existing file.
+- Identical files are set aside in `_Duplicates`, never deleted.
+- Undo never overwrites a file that is already present.
