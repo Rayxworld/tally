@@ -10,6 +10,24 @@ use tally::ledger::Ledger;
 use tally::sweep::{sweep, Summary, SweepOptions};
 use tally::undo::undo;
 
+#[test]
+fn config_file_requires_a_path_argument() {
+    for args in [vec!["--config-file"], vec!["--config-file", "--help"]] {
+        let args = args.into_iter().map(str::to_owned).collect::<Vec<_>>();
+        assert!(super::parse_args(&args).is_err());
+    }
+}
+
+#[test]
+fn config_file_accepts_a_path_argument() {
+    let args = ["--config-file", "custom.json"]
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let cli = super::parse_args(&args).unwrap();
+    assert_eq!(cli.config_file.as_deref(), Some(Path::new("custom.json")));
+}
+
 static COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 struct Env {

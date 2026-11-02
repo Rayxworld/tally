@@ -13,7 +13,7 @@ Tally is a safe, undoable file inbox for Windows. It keeps Downloads and Desktop
 
 ## Install
 
-Download `Tally_1.0.0_x64-setup.exe` from the GitHub Release and run it. The Desktop UI includes the file browser, system tray control, command palette, tags, duplicate review, storage visualizer, archive extraction, and batch rename.
+Download `Tally-Setup-1.0.0.exe` from the GitHub Release and run it. This installer includes the desktop app and CLI, and adds the CLI to the system PATH. Open a new terminal after installation to use `tally`. The Desktop UI includes the file browser, system tray control, command palette, tags, duplicate review, storage visualizer, archive extraction, and batch rename.
 
 ## Update Tally
 
@@ -28,23 +28,27 @@ up important files and configuration before upgrading.
 When a feature or fix is ready to share:
 
 1. Update the version consistently in `Cargo.toml`,
-   `desktop-ui/package.json`, and `desktop-ui/src-tauri/tauri.conf.json`.
-   Update the matching `Cargo.lock` files as needed.
+   `desktop-ui/package.json`, `desktop-ui/src-tauri/tauri.conf.json`, and
+   `installer.iss`. Update the matching `Cargo.lock` files as needed.
 2. Run the tests and build the Windows installers:
 
    ```powershell
    cargo test --all-targets
+   cargo build --release --bin tally
    cd desktop-ui
    npm install
    npm run build:windows
+   cd ..
+   & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" installer.iss
    ```
 
 3. Commit and push the changes to `main`.
 4. Create and push a matching version tag (for example, `v1.1.0`) on that
    commit. On GitHub, create a Release from that tag.
-5. Attach both generated installers from
-   `desktop-ui\src-tauri\target\release\bundle\nsis\` and
-   `desktop-ui\src-tauri\target\release\bundle\msi\`, then publish the release.
+5. Attach `installer-output\Tally-Setup-<version>.exe` to the GitHub Release.
+   This is the combined installer with the CLI on PATH. The Tauri NSIS/MSI
+   installers in `desktop-ui\src-tauri\target\release\bundle\` install the
+   desktop app only.
 6. Users update by downloading and running the new setup installer; announce
    the release link to existing users.
 
@@ -88,7 +92,9 @@ npm install
 npm run build:windows
 ```
 
-Upload this installer to GitHub Releases:
+The Tauri installers below contain the desktop app only. To build the
+recommended installer with the CLI and PATH setup, follow
+[Publish a new version](#publish-a-new-version).
 
 ```text
 desktop-ui\src-tauri\target\release\bundle\nsis\Tally_1.0.0_x64-setup.exe

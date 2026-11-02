@@ -2,6 +2,7 @@
 [package]
 name = "tally"
 version = "1.0.0"
+default-run = "tally"
 edition = "2021"
 description = "Safe, undoable folder organizer"
 license = "MIT"

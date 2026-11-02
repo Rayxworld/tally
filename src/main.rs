@@ -117,7 +117,10 @@ fn parse_args(args: &[String]) -> Result<Cli, String> {
             "--verbose" | "-v" => verbose = true,
             "--config-file" => {
                 i += 1;
-                let p = args.get(i).ok_or("--config-file needs a path")?;
+                let p = args
+                    .get(i)
+                    .filter(|path| !path.is_empty() && !path.starts_with("--"))
+                    .ok_or("--config-file needs a path")?;
                 config_file = Some(PathBuf::from(p));
             }
             other => return Err(format!("unknown argument '{other}'. Try: tally --help")),

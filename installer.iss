@@ -39,9 +39,8 @@ Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription
 [Files]
 ; CLI binary
 Source: "target\release\tally.exe";         DestDir: "{app}"; Flags: ignoreversion
-; Full Tauri/React desktop UI (built by `npm run tauri build` in desktop-ui)
-Source: "desktop-ui\src-tauri\target\release\Tally.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "desktop-ui\src-tauri\target\release\*.dll"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs skipifsourcedoesntexist
+; Full Tauri/React desktop UI (built by `npm run build:windows` in desktop-ui)
+Source: "desktop-ui\src-tauri\target\release\app.exe"; DestDir: "{app}"; DestName: "{#MyGuiExeName}"; Flags: ignoreversion
 
 [Icons]
 ; Start Menu
