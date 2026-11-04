@@ -1,0 +1,184 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tally — Private Stats</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;padding:24px;background:#101114;color:#f4f4f5;font-family:Arial,sans-serif}
+main{max-width:850px;margin:45px auto}
+h1{font-size:28px}
+.muted{color:#92939b}
+.panel{background:#191a20;border:1px solid #30313a;border-radius:14px;padding:22px;margin:18px 0}
+input,button{width:100%;padding:13px;border-radius:8px;font-size:15px}
+input{background:#101114;border:1px solid #41424b;color:white;margin:12px 0}
+button{background:#e8e8ed;color:#111;border:0;font-weight:bold;cursor:pointer}
+.secondary{background:#292a32;color:white;border:1px solid #41424b}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px}
+.stat{font-size:34px;font-weight:bold;margin-top:12px}
+.release{border-top:1px solid #30313a;padding:16px 0}
+.asset{display:flex;justify-content:space-between;gap:12px;padding:8px 0;color:#c3c3cc;overflow-wrap:anywhere}
+.hidden{display:none}
+#error{color:#ff9999}
+#status{color:#a5d6a7}
+@media(max-width:500px){body{padding:14px}.asset{flex-direction:column}}
+</style>
+</head>
+<body>
+<main>
+<h1>Tally <span class="muted">/ Stats</span></h1>
+<p class="muted">Private download analytics</p>
+
+<section id="login" class="panel">
+<h2>Administrator login</h2>
+<form id="loginForm">
+<input id="password" type="password" placeholder="Dashboard password" required>
+<button type="submit">Unlock dashboard</button>
+</form>
+<p id="error"></p>
+</section>
+
+<section id="dashboard" class="hidden">
+<div class="panel grid">
+<div><div class="muted">Total downloads</div><div class="stat" id="total">—</div></div>
+<div><div class="muted">Total releases</div><div class="stat" id="count">—</div></div>
+</div>
+
+<div class="panel">
+<div style="display:flex;justify-content:space-between;align-items:center;gap:12px">
+<h2>Release history</h2>
+<button class="secondary" id="refresh" style="width:auto">Refresh</button>
+</div>
+<p id="status">Loading...</p>
+<div id="releases"></div>
+</div>
+<button class="secondary" id="logout">Log out</button>
+</section>
+</main>
+
+<script>
+const login=document.getElementById("login");
+const dashboard=document.getElementById("dashboard");
+const error=document.getElementById("error");
+const status=document.getElementById("status");
+let token=sessionStorage.getItem("tally_stats_token");
+
+async function loadStats(){
+status.textContent="Loading statistics...";
+document.getElementById("refresh").disabled=true;
+
+try{
+const response=await fetch("/api/stats",{
+headers:{Authorization:"Bearer "+token}
+});
+
+if(response.status===401) throw new Error("INVALID");
+if(!response.ok) throw new Error("Unable to load statistics.");
+
+const data=await response.json();
+
+document.getElementById("total").textContent=
+Number(data.total_downloads).toLocaleString();
+
+document.getElementById("count").textContent=data.total_releases;
+
+const container=document.getElementById("releases");
+container.replaceChildren();
+
+if(!data.releases.length) container.textContent="No releases found.";
+
+data.releases.forEach(release=>{
+const section=document.createElement("div");
+section.className="release";
+
+const heading=document.createElement("h3");
+heading.textContent=release.name||release.version;
+section.appendChild(heading);
+
+const date=document.createElement("p");
+date.className="muted";
+date.textContent=release.published_at?
+new Date(release.published_at).toLocaleDateString():"Date unavailable";
+section.appendChild(date);
+
+const total=document.createElement("p");
+total.textContent="Release downloads: "+release.total_downloads;
+section.appendChild(total);
+
+release.assets.forEach(asset=>{
+const row=document.createElement("div");
+row.className="asset";
+
+const name=document.createElement("span");
+name.textContent=asset.name;
+
+const downloads=document.createElement("strong");
+downloads.textContent=asset.downloads+" downloads";
+
+row.append(name,downloads);
+section.appendChild(row);
+});
+
+container.appendChild(section);
+});
+
+status.textContent="Updated "+new Date().toLocaleTimeString();
+
+}catch(err){
+if(err.message==="INVALID"){
+sessionStorage.removeItem("tally_stats_token");
+token=null;
+dashboard.classList.add("hidden");
+login.classList.remove("hidden");
+error.textContent="Session expired. Please log in again.";
+}else{
+status.textContent=err.message;
+}
+}finally{
+document.getElementById("refresh").disabled=false;
+}
+}
+
+document.getElementById("loginForm").addEventListener("submit",async e=>{
+e.preventDefault();
+token=document.getElementById("password").value;
+error.textContent="Checking password...";
+
+try{
+const response=await fetch("/api/stats",{
+headers:{Authorization:"Bearer "+token}
+});
+
+if(!response.ok) throw new Error("Incorrect password.");
+
+sessionStorage.setItem("tally_stats_token",token);
+error.textContent="";
+login.classList.add("hidden");
+dashboard.classList.remove("hidden");
+await loadStats();
+
+}catch(err){
+error.textContent=err.message;
+}
+});
+
+document.getElementById("refresh").addEventListener("click",loadStats);
+
+document.getElementById("logout").addEventListener("click",()=>{
+sessionStorage.removeItem("tally_stats_token");
+token=null;
+dashboard.classList.add("hidden");
+login.classList.remove("hidden");
+document.getElementById("password").value="";
+});
+
+if(token){
+login.classList.add("hidden");
+dashboard.classList.remove("hidden");
+loadStats();
+}
+</script>
+</body>
+</html>
