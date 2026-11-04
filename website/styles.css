@@ -50,7 +50,7 @@ button { font: inherit; }
   background: rgba(16, 20, 27, 0.83);
   backdrop-filter: blur(18px);
 }
-.brand { display: inline-flex; align-items: center; gap: 10px; font: 800 20px/1 var(--serif); letter-spacing: -0.8px; }
+.brand { display: inline-flex; align-items: center; gap: 10px; font: 800 20px/1 var(--serif); letter-spacing: -0.8px; white-space: nowrap; }
 .brand img { width: 32px; height: 32px; border-radius: 9px; object-fit: cover; }
 .header-nav { display: flex; align-items: center; gap: 35px; color: #b2bdcc; font-size: 13px; font-weight: 600; }
 .header-nav > a:not(.nav-download):hover, .footer-github:hover { color: white; }

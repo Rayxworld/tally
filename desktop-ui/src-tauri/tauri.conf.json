@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-  "productName": "Tally",
-  "version": "1.0.0",
+  "productName": "Tally by Rayxworld",
+  "version": "1.0.2",
   "identifier": "com.rayxworld.tally",
   "build": {
     "frontendDist": "../dist",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "Tally",
+        "title": "Tally by Rayxworld",
         "width": 1100,
         "height": 700,
         "minWidth": 720,
@@ -29,7 +29,17 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis", "msi"],
+    "targets": ["nsis"],
+    "createUpdaterArtifacts": true,
+    "resources": {
+      "../../target/release/tally.exe": "tally.exe"
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "installerHooks": "windows/installer-hooks.nsh"
+      }
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -41,6 +51,17 @@
     "copyright": "Copyright (c) 2026 Rayxworld",
     "category": "Utility",
     "shortDescription": "Safe, undoable folder organizer",
-    "longDescription": "Tally automatically sorts and organizes your messy folders into clean categories — with full undo, duplicate detection, and batch renaming. Zero data loss, always."
+    "longDescription": "Tally by Rayxworld safely organizes folders with full undo, duplicate detection, batch renaming, and automatic signed updates."
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDRDMTZGRTg4Q0I1OUJFMDMKUldRRHZsbkxpUDRXVE1jWml5aXRnU0ZySEM2M2huQXY4T3dTZ3BXUE1CUHJnS1lUNU1lc0RkUkkK",
+      "endpoints": [
+        "https://github.com/Rayxworld/tally/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

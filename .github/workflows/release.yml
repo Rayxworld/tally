@@ -1,0 +1,43 @@
+name: Validate Tally release tag
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: windows-latest
+    steps:
+      - name: Check out release commit
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: desktop-ui/package-lock.json
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install frontend dependencies
+        working-directory: desktop-ui
+        run: npm ci
+
+      - name: Run CLI tests
+        run: cargo test --all-targets
+
+      - name: Run desktop backend tests
+        working-directory: desktop-ui/src-tauri
+        run: cargo test --lib
+
+      - name: Lint and build the frontend
+        working-directory: desktop-ui
+        run: |
+          npm run lint
+          npm run build

@@ -6,7 +6,7 @@ import tseslint from 'typescript-eslint'
 import { defineConfig, globalIgnores } from 'eslint/config'
 
 export default defineConfig([
-  globalIgnores(["backup-before-tally-branding-*/**", 'dist']),
+  globalIgnores(["backup-before-tally-branding-*/**", 'dist', 'src-tauri/target/**']),
   {
     files: ['**/*.{ts,tsx}'],
     extends: [
@@ -20,4 +20,3 @@ export default defineConfig([
     },
   },
 ])
-

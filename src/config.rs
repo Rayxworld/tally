@@ -1,4 +1,3 @@
-
 //! Configuration: routing rules, skip lists, and known-folder resolution.
 
 use serde::{Deserialize, Serialize};
@@ -261,6 +260,24 @@ impl KnownDirs {
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn from_map(map: HashMap<String, PathBuf>) -> KnownDirs {
         KnownDirs { map }
+    }
+
+    pub fn personal_folders(&self) -> Vec<PathBuf> {
+        [
+            "desktop",
+            "downloads",
+            "documents",
+            "pictures",
+            "videos",
+            "music",
+        ]
+        .into_iter()
+        .filter_map(|name| self.map.get(name).cloned())
+        .collect()
+    }
+
+    pub fn home_dir(&self) -> Option<&Path> {
+        self.map.get("home").map(PathBuf::as_path)
     }
 
     fn get(&self, name: &str, time: std::time::SystemTime) -> Result<String, String> {

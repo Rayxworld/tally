@@ -238,11 +238,14 @@ fn normalize_path(p: &Path) -> PathBuf {
     p.to_path_buf()
 }
 
-fn same_dir(a: &Path, b: &Path) -> bool {
-    let na = normalize_path(a);
-    let nb = normalize_path(b);
-    na.to_string_lossy()
-        .eq_ignore_ascii_case(&nb.to_string_lossy())
+fn inside_dir(path: &Path, directory: &Path) -> bool {
+    let path = key(&normalize_path(path));
+    let directory = key(&normalize_path(directory));
+    path == directory
+        || path.strip_prefix(&directory).is_some_and(|remaining| {
+            remaining.starts_with(std::path::MAIN_SEPARATOR)
+                || remaining.starts_with(if cfg!(windows) { '/' } else { '\\' })
+        })
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -262,6 +265,12 @@ pub struct PlannedAction {
     pub rule_name: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ApprovedAction {
+    pub source: PathBuf,
+    pub destination: PathBuf,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SweepPlan {
     pub actions: Vec<PlannedAction>,
@@ -277,15 +286,32 @@ pub fn plan_sweep(
     target: &Path,
     now: SystemTime,
 ) -> Result<SweepPlan, String> {
-    let mut plan = SweepPlan::default();
-
     if is_project_root(target) {
-        plan.warning = Some(format!(
-            "Recognized software project at {}. Automatic sorting is disabled for this folder.",
-            target.display()
-        ));
-        return Ok(plan);
+        return Ok(SweepPlan {
+            warning: Some(format!(
+                "Recognized software project at {}. Automatic sorting is disabled for this folder.",
+                target.display()
+            )),
+            ..SweepPlan::default()
+        });
     }
+
+    let mut entries: Vec<fs::DirEntry> = fs::read_dir(target)
+        .map_err(|e| format!("cannot read {}: {e}", target.display()))?
+        .filter_map(Result::ok)
+        .collect();
+    entries.sort_by_key(|entry| entry.file_name());
+    let sources = entries.into_iter().map(|entry| entry.path()).collect();
+    plan_sweep_paths(cfg, known, sources, now)
+}
+
+fn plan_sweep_paths(
+    cfg: &Config,
+    known: &KnownDirs,
+    mut sources: Vec<PathBuf>,
+    now: SystemTime,
+) -> Result<SweepPlan, String> {
+    let mut plan = SweepPlan::default();
 
     // Pre-validate all rule destinations up front
     for rule in &cfg.rules {
@@ -309,19 +335,13 @@ pub fn plan_sweep(
         .collect();
     let min_age = Duration::from_secs(cfg.min_age_seconds);
 
-    let mut entries: Vec<fs::DirEntry> = fs::read_dir(target)
-        .map_err(|e| format!("cannot read {}: {e}", target.display()))?
-        .filter_map(Result::ok)
-        .collect();
-    entries.sort_by_key(|entry| entry.file_name());
+    sources.sort();
 
     let mut reserved: HashMap<String, PathBuf> = HashMap::new();
 
-    for entry in entries {
-        let source = entry.path();
-
-        let file_type = match entry.file_type() {
-            Ok(file_type) => file_type,
+    for source in sources {
+        let metadata = match fs::symlink_metadata(&source) {
+            Ok(metadata) => metadata,
             Err(error) => {
                 plan.summary.failed += 1;
                 plan.actions.push(PlannedAction {
@@ -335,11 +355,12 @@ pub fn plan_sweep(
             }
         };
 
+        let file_type = metadata.file_type();
         if file_type.is_dir() {
             continue;
         }
 
-        let name = match entry.file_name().to_str() {
+        let name = match source.file_name().and_then(|name| name.to_str()) {
             Some(name) => name.to_owned(),
             None => {
                 plan.summary.skipped += 1;
@@ -462,13 +483,16 @@ pub fn plan_sweep(
             }
         };
 
-        if same_dir(target, &dest_dir) {
+        if source
+            .parent()
+            .is_some_and(|parent| inside_dir(parent, &dest_dir))
+        {
             plan.summary.skipped += 1;
             plan.actions.push(PlannedAction {
                 source,
                 destination: None,
                 kind: PlannedActionKind::Skip,
-                reason: "already in its destination folder".to_owned(),
+                reason: "already inside its destination folder".to_owned(),
                 rule_name: None,
             });
             continue;
@@ -517,6 +541,300 @@ pub fn plan_sweep(
     Ok(plan)
 }
 
+fn skipped_path(path: PathBuf, reason: &str, plan: &mut SweepPlan) {
+    plan.summary.skipped += 1;
+    plan.actions.push(PlannedAction {
+        source: path,
+        destination: None,
+        kind: PlannedActionKind::Skip,
+        reason: reason.to_owned(),
+        rule_name: None,
+    });
+}
+
+fn protected_directory(name: &str) -> bool {
+    [
+        "$recycle.bin",
+        "appdata",
+        "application data",
+        "node_modules",
+        "program files",
+        "program files (x86)",
+        "programdata",
+        "recovery",
+        "system volume information",
+        "windows",
+        "windows.old",
+    ]
+    .iter()
+    .any(|protected| name.eq_ignore_ascii_case(protected))
+}
+
+fn protected_location(path: &Path, home: Option<&Path>) -> bool {
+    let path = normalize_path(path);
+    let home = home.map(normalize_path);
+    let path = home
+        .as_deref()
+        .filter(|home| inside_dir(&path, home))
+        .and_then(|home| path.strip_prefix(home).ok())
+        .unwrap_or(&path);
+    path.components().any(|component| {
+        component
+            .as_os_str()
+            .to_str()
+            .is_some_and(protected_directory)
+    })
+}
+
+fn is_volume_root(path: &Path) -> bool {
+    let component_count = path.components().count();
+    #[cfg(target_os = "windows")]
+    {
+        component_count <= 2
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        component_count <= 1
+    }
+}
+
+/// Plan supported files found recursively in the user's standard personal folders.
+/// Symbolic links, project roots, hidden directories, and system-like directories are not traversed.
+pub fn plan_personal_sweep(
+    cfg: &Config,
+    known: &KnownDirs,
+    now: SystemTime,
+) -> Result<SweepPlan, String> {
+    let mut roots = Vec::new();
+    let mut skipped = SweepPlan::default();
+    for root in known.personal_folders() {
+        let metadata = match fs::symlink_metadata(&root) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                skipped.summary.failed += 1;
+                skipped.actions.push(PlannedAction {
+                    source: root,
+                    destination: None,
+                    kind: PlannedActionKind::Failed,
+                    reason: format!("cannot inspect personal folder: {error}"),
+                    rule_name: None,
+                });
+                continue;
+            }
+        };
+        if metadata.file_type().is_symlink() {
+            skipped_path(
+                root,
+                "personal folder is a symbolic link; not scanned",
+                &mut skipped,
+            );
+            continue;
+        }
+        if !metadata.is_dir() {
+            continue;
+        }
+        let root = root
+            .canonicalize()
+            .map(|path| normalize_path(&path))
+            .map_err(|error| format!("cannot resolve personal folder: {error}"))?;
+        if is_volume_root(&root)
+            || protected_location(&root, known.home_dir())
+            || known.home_dir().is_some_and(|home| inside_dir(home, &root))
+        {
+            skipped_path(
+                root,
+                "personal folder resolves to a drive, profile, or protected system location; not scanned",
+                &mut skipped,
+            );
+            continue;
+        }
+        roots.push(root);
+    }
+    roots.sort();
+    roots.dedup_by(|a, b| key(a) == key(b));
+
+    if roots.is_empty() {
+        if skipped.summary.failed == 0 && skipped.summary.skipped == 0 {
+            return Err("None of the standard personal folders are available to scan.".into());
+        }
+        return Ok(skipped);
+    }
+
+    let mut unique_roots = Vec::new();
+    for root in roots {
+        if !unique_roots
+            .iter()
+            .any(|parent: &PathBuf| root.starts_with(parent))
+        {
+            unique_roots.push(root);
+        }
+    }
+
+    let mut sources = Vec::new();
+    let mut stack = unique_roots.clone();
+
+    while let Some(directory) = stack.pop() {
+        if is_project_root(&directory) {
+            skipped_path(
+                directory,
+                "recognized project folder; left untouched",
+                &mut skipped,
+            );
+            continue;
+        }
+
+        let entries = match fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) => {
+                skipped.summary.failed += 1;
+                skipped.actions.push(PlannedAction {
+                    source: directory.clone(),
+                    destination: None,
+                    kind: PlannedActionKind::Failed,
+                    reason: format!("cannot scan folder: {error}"),
+                    rule_name: None,
+                });
+                continue;
+            }
+        };
+
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) => {
+                    skipped.summary.failed += 1;
+                    skipped.actions.push(PlannedAction {
+                        source: directory.clone(),
+                        destination: None,
+                        kind: PlannedActionKind::Failed,
+                        reason: format!("cannot inspect folder entry: {error}"),
+                        rule_name: None,
+                    });
+                    continue;
+                }
+            };
+
+            let path = entry.path();
+            let file_type = match entry.file_type() {
+                Ok(file_type) => file_type,
+                Err(error) => {
+                    skipped.summary.failed += 1;
+                    skipped.actions.push(PlannedAction {
+                        source: path,
+                        destination: None,
+                        kind: PlannedActionKind::Failed,
+                        reason: format!("cannot inspect file: {error}"),
+                        rule_name: None,
+                    });
+                    continue;
+                }
+            };
+
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if file_type.is_symlink() {
+                skipped_path(path, "symbolic link; not followed", &mut skipped);
+            } else if file_type.is_dir() {
+                if name.starts_with('.') {
+                    skipped_path(path, "hidden folder; not scanned", &mut skipped);
+                } else if protected_directory(&name) {
+                    skipped_path(
+                        path,
+                        "protected system or application folder; not scanned",
+                        &mut skipped,
+                    );
+                } else if name.eq_ignore_ascii_case(&cfg.duplicates_folder) {
+                    skipped_path(path, "Tally duplicates folder; not scanned", &mut skipped);
+                } else {
+                    stack.push(path);
+                }
+            } else if file_type.is_file() {
+                sources.push(path);
+            } else {
+                skipped_path(path, "not a regular file", &mut skipped);
+            }
+        }
+    }
+
+    let mut plan = plan_sweep_paths(cfg, known, sources, now)?;
+    plan.summary.skipped += skipped.summary.skipped;
+    plan.summary.failed += skipped.summary.failed;
+    plan.actions.extend(skipped.actions);
+    plan.actions.sort_by(|a, b| a.source.cmp(&b.source));
+    Ok(plan)
+}
+
+/// Execute only the exact file moves the user approved for a destination group.
+/// Replanning and exact path checks prevent stale previews from moving unexpected files.
+pub fn sweep_approved_group(
+    cfg: &Config,
+    known: &KnownDirs,
+    group_destination: &Path,
+    approved: Vec<ApprovedAction>,
+    now: SystemTime,
+    ledger: &Ledger,
+) -> Result<Summary, String> {
+    if approved.is_empty() {
+        return Err("No files were selected for approval.".into());
+    }
+
+    let plan = plan_personal_sweep(cfg, known, now)?;
+    let approved_by_source: HashMap<String, PathBuf> = approved
+        .into_iter()
+        .map(|action| (key(&action.source), action.destination))
+        .collect();
+    let mut selected = Vec::with_capacity(approved_by_source.len());
+
+    for action in plan.actions {
+        let Some(expected_destination) = approved_by_source.get(&key(&action.source)) else {
+            continue;
+        };
+        let destination = action
+            .destination
+            .as_ref()
+            .ok_or_else(|| "The preview changed; scan again before approving.".to_owned())?;
+        if action.kind == PlannedActionKind::Skip
+            || action.kind == PlannedActionKind::Failed
+            || destination != expected_destination
+            || destination.parent() != Some(group_destination)
+        {
+            return Err("The preview changed; scan again before approving.".into());
+        }
+        selected.push(action);
+    }
+
+    if selected.len() != approved_by_source.len() {
+        return Err(
+            "Some approved files changed or disappeared; scan again before approving.".into(),
+        );
+    }
+
+    execute_plan(
+        SweepPlan {
+            summary: Summary {
+                moved: selected
+                    .iter()
+                    .filter(|action| action.kind == PlannedActionKind::Move)
+                    .count(),
+                duplicates: selected
+                    .iter()
+                    .filter(|action| action.kind == PlannedActionKind::Duplicate)
+                    .count(),
+                ..Summary::default()
+            },
+            actions: selected,
+            warning: None,
+        },
+        group_destination,
+        &SweepOptions {
+            dry_run: false,
+            verbose: true,
+            now,
+        },
+        ledger,
+    )
+}
+
 /// Sweep the top level of `target` (it does not enter sub-folders).
 pub fn sweep(
     cfg: &Config,
@@ -526,7 +844,15 @@ pub fn sweep(
     ledger: &Ledger,
 ) -> Result<Summary, String> {
     let plan = plan_sweep(cfg, known, target, opts.now)?;
+    execute_plan(plan, target, opts, ledger)
+}
 
+fn execute_plan(
+    plan: SweepPlan,
+    target: &Path,
+    opts: &SweepOptions,
+    ledger: &Ledger,
+) -> Result<Summary, String> {
     if let Some(warning) = &plan.warning {
         println!("[!] {warning}");
         println!("No files were changed. Run Tally on a normal inbox folder instead.");

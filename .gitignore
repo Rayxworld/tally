@@ -26,6 +26,7 @@ Thumbs.db
 
 # Generated Windows installer binaries
 /installer-output/
+/latest.json
 
 # Release artifacts and local Tally state
 *.msi

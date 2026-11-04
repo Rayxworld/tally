@@ -1,9 +1,9 @@
-#define MyAppName      "Tally"
-#define MyAppVersion   "1.0.0"
+#define MyAppName      "Tally by Rayxworld"
+#define MyAppVersion   "1.0.2"
 #define MyAppPublisher "Rayxworld"
 #define MyAppURL       "https://github.com/Rayxworld/tally"
 #define MyAppExeName   "tally.exe"
-#define MyGuiExeName   "Tally.exe"
+#define MyGuiExeName   "Tally-GUI.exe"
 
 [Setup]
 AppId={{B74B1D36-9B6D-4B7C-9E1A-3A9C8F4B12D7}
@@ -38,14 +38,14 @@ Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription
 
 [Files]
 ; CLI binary
-Source: "target\release\tally.exe";         DestDir: "{app}"; Flags: ignoreversion
+Source: "target\release\tally.exe";         DestDir: "{app}"; DestName: "{#MyAppExeName}"; Flags: ignoreversion
 ; Full Tauri/React desktop UI (built by `npm run build:windows` in desktop-ui)
 Source: "desktop-ui\src-tauri\target\release\app.exe"; DestDir: "{app}"; DestName: "{#MyGuiExeName}"; Flags: ignoreversion
 
 [Icons]
 ; Start Menu
 Name: "{group}\Tally";                Filename: "{app}\{#MyGuiExeName}"; Comment: "Open the Tally file organizer"
-Name: "{group}\Tally (CLI Help)";     Filename: "{cmd}"; Parameters: "/k ""{app}\tally.exe --help"""; Comment: "Show CLI commands"
+Name: "{group}\Tally (CLI Help)";     Filename: "{cmd}"; Parameters: "/k ""{app}\{#MyAppExeName} --help"""; Comment: "Show CLI commands"
 Name: "{group}\Uninstall Tally";      Filename: "{uninstallexe}"
 ; Desktop (optional task)
 Name: "{commondesktop}\Tally";        Filename: "{app}\{#MyGuiExeName}"; Tasks: desktopicon
@@ -57,6 +57,7 @@ Filename: "{app}\{#MyGuiExeName}"; Description: "Launch Tally now"; Flags: nowai
 const
   EnvironmentKey = 'SYSTEM\CurrentControlSet\Control\Session Manager\Environment';
   TallyKey = 'Software\Rayxworld\Tally';
+  ContextMenuKey = 'Software\Classes\Directory\shell\Tally';
 
 function NormalizePathEntry(Value: string): string;
 begin
@@ -114,6 +115,22 @@ begin
     RegWriteDWordValue(HKEY_LOCAL_MACHINE, TallyKey, 'AddedPath', 0);
 end;
 
+procedure UpdateContextMenu;
+var
+  GuiPath: string;
+begin
+  if not RegKeyExists(HKEY_CURRENT_USER, ContextMenuKey) then
+    Exit;
+
+  GuiPath := ExpandConstant('{app}\{#MyGuiExeName}');
+  if not RegWriteStringValue(HKEY_CURRENT_USER, ContextMenuKey, 'Icon',
+    GuiPath) then
+    RaiseException('Could not update the Tally Explorer menu icon.');
+  if not RegWriteStringValue(HKEY_CURRENT_USER, ContextMenuKey + '\command',
+    '', '"' + GuiPath + '" "%1"') then
+    RaiseException('Could not update the Tally Explorer menu command.');
+end;
+
 procedure RemoveTallyFromPath;
 var
   ExistingPath, NewPath, Part, InstallPath, Remaining: string;
@@ -157,7 +174,10 @@ end;
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep = ssPostInstall then
+  begin
     AddTallyToPath;
+    UpdateContextMenu;
+  end;
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);

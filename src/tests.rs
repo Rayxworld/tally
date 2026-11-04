@@ -7,7 +7,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime};
 use tally::config::{Config, KnownDirs};
 use tally::ledger::Ledger;
-use tally::sweep::{sweep, Summary, SweepOptions};
+use tally::sweep::{
+    plan_personal_sweep, sweep, sweep_approved_group, ApprovedAction, PlannedActionKind, Summary,
+    SweepOptions,
+};
 use tally::undo::undo;
 
 #[test]
@@ -337,5 +340,195 @@ fn date_tokens_in_rules_sort_by_year_and_month() {
         exists(&expected),
         "Expected to find file at {}",
         expected.display()
+    );
+}
+
+#[test]
+fn personal_scan_finds_nested_files_but_skips_projects_and_protected_folders() {
+    let e = Env::new();
+    let downloads = e.path("downloads");
+    fs::create_dir_all(downloads.join("phone exports")).unwrap();
+    fs::create_dir_all(downloads.join("sample-project/src")).unwrap();
+    fs::create_dir_all(downloads.join("Windows")).unwrap();
+    fs::create_dir_all(e.path("documents")).unwrap();
+    fs::write(downloads.join("phone exports/scan.pdf"), "document").unwrap();
+    fs::write(downloads.join("sample-project/Cargo.toml"), "[package]").unwrap();
+    fs::write(
+        downloads.join("sample-project/src/report.pdf"),
+        "project file",
+    )
+    .unwrap();
+    fs::write(downloads.join("Windows/system.pdf"), "protected").unwrap();
+
+    let plan = plan_personal_sweep(
+        &e.cfg,
+        &e.known,
+        SystemTime::now() + Duration::from_secs(60),
+    )
+    .unwrap();
+
+    assert!(plan.actions.iter().any(|action| {
+        action.source == downloads.join("phone exports/scan.pdf")
+            && action.kind == PlannedActionKind::Move
+    }));
+    assert!(plan.actions.iter().any(|action| {
+        action.source == downloads.join("sample-project")
+            && action.kind == PlannedActionKind::Skip
+            && action.reason.contains("project")
+    }));
+    assert!(plan.actions.iter().any(|action| {
+        action.source == downloads.join("Windows")
+            && action.kind == PlannedActionKind::Skip
+            && action.reason.contains("protected")
+    }));
+    assert!(!plan
+        .actions
+        .iter()
+        .any(|action| action.source == downloads.join("sample-project/src/report.pdf")));
+}
+
+#[test]
+fn personal_scan_preserves_destination_subfolders_and_never_reenters_duplicates() {
+    let e = Env::new();
+    let downloads = e.path("downloads");
+    let documents = e.path("documents");
+    fs::create_dir_all(downloads.join("camera")).unwrap();
+    fs::create_dir_all(documents.join("Reports")).unwrap();
+    fs::create_dir_all(documents.join("_Duplicates")).unwrap();
+    fs::write(downloads.join("camera/new.pdf"), "new").unwrap();
+    fs::write(documents.join("Reports/already-filed.pdf"), "filed").unwrap();
+    fs::write(documents.join("_Duplicates/copy.pdf"), "copy").unwrap();
+
+    let plan = plan_personal_sweep(
+        &e.cfg,
+        &e.known,
+        SystemTime::now() + Duration::from_secs(60),
+    )
+    .unwrap();
+
+    assert!(plan.actions.iter().any(|action| {
+        action.source == documents.join("Reports/already-filed.pdf")
+            && action.kind == PlannedActionKind::Skip
+            && action.reason.contains("destination folder")
+    }));
+    assert!(plan.actions.iter().any(|action| {
+        action.source == documents.join("_Duplicates")
+            && action.kind == PlannedActionKind::Skip
+            && action.reason.contains("duplicates folder")
+    }));
+    assert!(!plan
+        .actions
+        .iter()
+        .any(|action| action.source == documents.join("_Duplicates/copy.pdf")));
+}
+
+#[test]
+fn personal_scan_rejects_a_known_folder_redirected_to_a_protected_location() {
+    let e = Env::new();
+    let protected = e.path("Windows");
+    fs::create_dir_all(&protected).unwrap();
+    fs::write(protected.join("system.pdf"), "protected").unwrap();
+
+    let mut map = HashMap::new();
+    for name in ["desktop", "pictures", "videos", "music"] {
+        map.insert(name.to_string(), e.path(name));
+    }
+    map.insert("downloads".to_string(), protected.clone());
+    map.insert("documents".to_string(), e.path("documents"));
+    map.insert("home".to_string(), e.root.clone());
+    let known = KnownDirs::from_map(map);
+
+    let plan = plan_personal_sweep(&e.cfg, &known, SystemTime::now()).unwrap();
+
+    assert!(plan.actions.iter().any(|action| {
+        action.source == protected
+            && action.kind == PlannedActionKind::Skip
+            && action.reason.contains("protected system location")
+    }));
+    assert!(!plan
+        .actions
+        .iter()
+        .any(|action| action.source == protected.join("system.pdf")));
+}
+
+#[test]
+fn approving_one_personal_destination_moves_only_that_group_and_is_undoable() {
+    let e = Env::new();
+    let downloads = e.path("downloads");
+    fs::create_dir_all(downloads.join("camera")).unwrap();
+    fs::create_dir_all(e.path("documents")).unwrap();
+    fs::write(downloads.join("camera/scan.pdf"), "document").unwrap();
+    fs::write(downloads.join("camera/photo.png"), "image").unwrap();
+
+    let now = SystemTime::now() + Duration::from_secs(60);
+    let plan = plan_personal_sweep(&e.cfg, &e.known, now).unwrap();
+    let approved: Vec<ApprovedAction> = plan
+        .actions
+        .iter()
+        .filter(|action| {
+            action.kind == PlannedActionKind::Move
+                && action.destination.as_deref() == Some(e.path("documents/scan.pdf").as_path())
+        })
+        .map(|action| ApprovedAction {
+            source: action.source.clone(),
+            destination: action.destination.clone().unwrap(),
+        })
+        .collect();
+    assert_eq!(approved.len(), 1);
+
+    let summary = sweep_approved_group(
+        &e.cfg,
+        &e.known,
+        &e.path("documents"),
+        approved,
+        now,
+        &e.ledger,
+    )
+    .unwrap();
+
+    assert_eq!(summary.moved, 1);
+    assert!(e.path("documents/scan.pdf").exists());
+    assert!(downloads.join("camera/photo.png").exists());
+    assert_eq!(e.ledger.load().unwrap().len(), 1);
+    assert_eq!(undo(&e.ledger, 1, false).unwrap().restored, 1);
+    assert!(downloads.join("camera/scan.pdf").exists());
+}
+
+#[test]
+fn personal_group_approval_rejects_a_stale_destination_preview() {
+    let e = Env::new();
+    let downloads = e.path("downloads");
+    fs::create_dir_all(&downloads).unwrap();
+    fs::create_dir_all(e.path("documents")).unwrap();
+    fs::write(downloads.join("invoice.pdf"), "invoice").unwrap();
+
+    let now = SystemTime::now() + Duration::from_secs(60);
+    let plan = plan_personal_sweep(&e.cfg, &e.known, now).unwrap();
+    let approved = plan
+        .actions
+        .iter()
+        .find(|action| action.source == downloads.join("invoice.pdf"))
+        .map(|action| {
+            vec![ApprovedAction {
+                source: action.source.clone(),
+                destination: action.destination.clone().unwrap(),
+            }]
+        })
+        .unwrap();
+    fs::write(e.path("documents/invoice.pdf"), "new file").unwrap();
+
+    let result = sweep_approved_group(
+        &e.cfg,
+        &e.known,
+        &e.path("documents"),
+        approved,
+        now,
+        &e.ledger,
+    );
+
+    assert!(result.unwrap_err().contains("preview changed"));
+    assert_eq!(
+        fs::read_to_string(downloads.join("invoice.pdf")).unwrap(),
+        "invoice"
     );
 }

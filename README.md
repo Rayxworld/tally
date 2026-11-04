@@ -1,6 +1,6 @@
-# Tally
+# Tally by Rayxworld
 
-Tally is a safe, undoable file inbox for Windows. It keeps Downloads and Desktop clear without deleting or overwriting your files.
+Tally by Rayxworld is a safe, undoable file inbox for Windows. The app is called Tally; the command-line executable and command remain `tally`.
 
 ## Why Tally
 
@@ -13,48 +13,96 @@ Tally is a safe, undoable file inbox for Windows. It keeps Downloads and Desktop
 
 ## Install
 
-Download `Tally-Setup-1.0.0.exe` from the GitHub Release and run it. This installer includes the desktop app and CLI, and adds the CLI to the system PATH. Open a new terminal after installation to use `tally`. The Desktop UI includes the file browser, system tray control, command palette, tags, duplicate review, storage visualizer, archive extraction, and batch rename.
+Download the **Tally by Rayxworld** x64 NSIS installer from the
+[GitHub Releases](https://github.com/Rayxworld/tally/releases) page. This
+updater-compatible installer includes the desktop app and CLI, and adds the
+CLI to your user PATH. Open a new terminal after installation to use `tally`.
 
 ## Update Tally
 
-Tally does not currently have an in-app automatic updater. To update an existing
-installation, download the newest `Tally_<version>_x64-setup.exe` from
-[GitHub Releases](https://github.com/Rayxworld/tally/releases), close Tally,
-and run the installer. Install it to the existing location if prompted. Back
-up important files and configuration before upgrading.
+Tally checks GitHub Releases for signed updates. In Settings, choose **Check for
+updates**; if a newer version is available, Tally verifies the signature,
+downloads and installs the update, then restarts. The CLI is included in the
+same signed installer and is updated with the desktop app.
+
+The original v1.0.0 Inno Setup installer is not compatible with in-app updates.
+Users of that installer must uninstall it first, then install the new
+Tauri/NSIS installer once from GitHub Releases. This also removes the old
+system-wide CLI PATH entry so the new, auto-updated CLI is selected.
+Subsequent updates can be installed from within Tally.
+
+## Organize personal folders
+
+The desktop **Scan & Organize** action scans Desktop, Downloads, Documents,
+Pictures, Videos, and Music, including their subfolders. It does not scan
+entire drives, follow symbolic links, or enter detected software projects and
+protected system/application folders. Tally previews each proposed move with
+its source and destination, then requires separate approval for every
+destination group. Files with unknown types stay untouched until you add a
+routing rule. Skipped items and scan errors show their reasons in the preview.
+Each approved destination group can be undone from History.
+
+The CLI is intentionally narrower: `tally --sweep <DIR>` only organizes
+supported files directly inside the folder you name.
 
 ## Publish a new version
 
 When a feature or fix is ready to share:
 
-1. Update the version consistently in `Cargo.toml`,
-   `desktop-ui/package.json`, `desktop-ui/src-tauri/tauri.conf.json`, and
-   `installer.iss`. Update the matching `Cargo.lock` files as needed.
-2. Run the tests and build the Windows installers:
+1. Update the version in `Cargo.toml`, `desktop-ui/package.json`,
+   `desktop-ui/src-tauri/Cargo.toml`, and
+   `desktop-ui/src-tauri/tauri.conf.json`. Update `installer.iss` only when
+   building the legacy installer.
+2. Keep the updater signing key on the release computer. It is stored at
+   `%USERPROFILE%\.tauri\tally-updater.key`; do not commit it or upload it as a
+   GitHub Actions secret. Keep a secure backup. Losing it prevents future
+   updates from being signed. The public key in `tauri.conf.json` must remain
+   paired with this private key.
+3. Run tests and build the updater-compatible Windows installer locally:
 
    ```powershell
    cargo test --all-targets
+   Push-Location desktop-ui
+   npm ci
+   npm run lint
+   npm run build
+   Pop-Location
    cargo build --release --bin tally
-   cd desktop-ui
-   npm install
-   npm run build:windows
-   cd ..
-   & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" installer.iss
+   Push-Location desktop-ui
+   $env:TAURI_SIGNING_PRIVATE_KEY = (Get-Content "$HOME\.tauri\tally-updater.key" -Raw).Trim()
+   npm run build:windows -- --bundles nsis
+   Remove-Item Env:\TAURI_SIGNING_PRIVATE_KEY
+   Pop-Location
    ```
 
-3. Commit and push the changes to `main`.
-4. Create and push a matching version tag (for example, `v1.1.0`) on that
-   commit. On GitHub, create a Release from that tag.
-5. Attach `installer-output\Tally-Setup-<version>.exe` to the GitHub Release.
-   This is the combined installer with the CLI on PATH. The Tauri NSIS/MSI
-   installers in `desktop-ui\src-tauri\target\release\bundle\` install the
-   desktop app only.
-6. Users update by downloading and running the new setup installer; announce
-   the release link to existing users.
+4. Generate the updater manifest from the signed installer and its signature:
 
-Do not create a release from an old commit: the version tag must point to the
-commit containing the release changes. Publishing a GitHub Release alone does
-not make the app automatically update itself.
+   ```powershell
+   node scripts\create-updater-manifest.mjs v1.1.0 desktop-ui\src-tauri\target\release\bundle\nsis latest.json
+   ```
+
+5. Commit and push the versioned source, then create and publish the matching
+   GitHub Release with `RELEASE_NOTES.md`, the `*_x64-setup.exe` installer,
+   its `.sig` signature, and `latest.json`. For example:
+
+   ```powershell
+   git tag v1.1.0
+   git push origin main
+   git push origin v1.1.0
+   gh release create v1.1.0 `
+     "desktop-ui\src-tauri\target\release\bundle\nsis\Tally by Rayxworld_1.1.0_x64-setup.exe" `
+     "desktop-ui\src-tauri\target\release\bundle\nsis\Tally by Rayxworld_1.1.0_x64-setup.exe.sig" `
+     latest.json `
+     --title "Tally by Rayxworld v1.1.0" `
+     --notes-file RELEASE_NOTES.md
+   ```
+
+   GitHub Actions validates tagged releases; it does not receive the signing
+   key or build/publish the signed installer. The `latest.json` release asset
+   and matching signed installer/signature are required for in-app updates.
+
+Do not publish an unsigned installer or change the updater public key. The
+version tag must point to the commit containing the release changes.
 
 ## Website
 
@@ -78,28 +126,29 @@ and in the completed deployment workflow.
 | --- | --- |
 | `Ctrl + K` | Open Command Palette |
 | `Ctrl + /` | Open Help & Shortcuts |
+| `Ctrl + T` | Open a new tab |
+| `Alt + Left` / `Alt + Right` | Navigate back / forward |
+| `Alt + Up` | Open the parent folder |
+| `F5` | Refresh the current folder |
 | `Esc` | Close menus and dialogs |
 | `Ctrl + click` | Add/remove an item from selection |
 | `Shift + click` | Select a range |
 
 Right-click an unrecognized file and choose **Teach Tally this type** to create a saved routing rule.
 
-## Build a Windows release
+## Build a Windows release locally
 
 ```powershell
-cd desktop-ui
-npm install
-npm run build:windows
+cargo build --release --bin tally
+Push-Location desktop-ui
+$env:TAURI_SIGNING_PRIVATE_KEY = (Get-Content "$HOME\.tauri\tally-updater.key" -Raw).Trim()
+npm run build:windows -- --bundles nsis
+Remove-Item Env:\TAURI_SIGNING_PRIVATE_KEY
+Pop-Location
 ```
 
-The Tauri installers below contain the desktop app only. To build the
-recommended installer with the CLI and PATH setup, follow
-[Publish a new version](#publish-a-new-version).
-
-```text
-desktop-ui\src-tauri\target\release\bundle\nsis\Tally_1.0.0_x64-setup.exe
-desktop-ui\src-tauri\target\release\bundle\msi\Tally_1.0.0_x64_en-US.msi
-```
+The signed NSIS installer contains both the desktop app and CLI. The legacy
+Inno Setup installer is not compatible with in-app updates.
 
 ## Command line
 
@@ -111,9 +160,14 @@ cargo build --release --bin tally
 .\target\release\tally.exe --undo
 ```
 
+The installed command-line program is `tally.exe`; the desktop app has its own
+executable name. They are distinct because Windows treats file names as
+case-insensitive.
+
 ## Safety
 
-- Only top-level files in the chosen folder are organized.
+- The desktop scan is limited to standard personal folders; the CLI only
+  processes top-level files in the chosen folder.
 - Tally skips hidden files, shortcuts, partial downloads, and very recent files.
 - Name collisions receive a numbered name; Tally never overwrites an existing file.
 - Identical files are set aside in `_Duplicates`, never deleted.

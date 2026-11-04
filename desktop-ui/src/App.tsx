@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { invoke } from '@tauri-apps/api/core'
+import { getCurrentWindow } from '@tauri-apps/api/window'
+import { check, type Update } from '@tauri-apps/plugin-updater'
 import {
   AlertCircle, ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Check,
   ChevronRight, Code2, Copy, ExternalLink, Eye, File, FileArchive,
@@ -64,6 +66,11 @@ type SweepPlan = {
   actions: PlannedAction[]
   summary: SweepSummary
   warning: string | null
+}
+
+type SweepGroup = {
+  destination: string
+  actions: Array<PlannedAction & { destination: string }>
 }
 
 type Transaction = {
@@ -196,12 +203,36 @@ function basename(path: string): string {
   return parts.length ? parts[parts.length - 1] : path
 }
 
+function groupSweepActions(actions: PlannedAction[]): SweepGroup[] {
+  const groups = new Map<string, Array<PlannedAction & { destination: string }>>()
+  for (const action of actions) {
+    if ((action.kind !== 'Move' && action.kind !== 'Duplicate') || !action.destination) continue
+    const separator = Math.max(action.destination.lastIndexOf('/'), action.destination.lastIndexOf('\\'))
+    const destination = separator > 0 ? action.destination.slice(0, separator) : action.destination
+    const group = groups.get(destination) ?? []
+    group.push({ ...action, destination: action.destination })
+    groups.set(destination, group)
+  }
+  return [...groups].map(([destination, groupActions]) => ({ destination, actions: groupActions }))
+    .sort((a, b) => a.destination.localeCompare(b.destination))
+}
+
 function humanBytes(b: number): string {
   if (b < 1024) return `${b} B`
   const u = ['KB','MB','GB','TB']
   let v = b / 1024, i = 0
   while (v >= 1024 && i < u.length - 1) { v /= 1024; i++ }
   return `${v.toFixed(1)} ${u[i]}`
+}
+
+function isSafeFileName(name: string): boolean {
+  return name.length > 0 &&
+    name !== '.' &&
+    name !== '..' &&
+    !/[<>:"/\\|?*]/.test(name) &&
+    !Array.from(name).some(char => char.charCodeAt(0) < 32) &&
+    !/[. ]$/.test(name) &&
+    !/^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)/i.test(name)
 }
 
 // ─── App ──────────────────────────────────────────────────────────────────────
@@ -237,16 +268,19 @@ export default function App() {
   const [routeItem, setRouteItem] = useState<FileItem | null>(null)
   const [routeDestination, setRouteDestination] = useState('{documents}/Other')
   const [routeLabel, setRouteLabel] = useState('My file types')
+  const [resumeSweepAfterTeach, setResumeSweepAfterTeach] = useState(false)
 
   // ── Watch / tally state ──────────────────────────────────────────────────────
   const [watchedFolders, setWatchedFolders] = useState<string[]>([])
-  const [contextMenuEnabled, setContextMenuEnabled] = useState(true)
+  const [contextMenuEnabled, setContextMenuEnabled] = useState(false)
 
   // ── Sweep panel ──────────────────────────────────────────────────────────────
   const [showSweepPanel, setShowSweepPanel] = useState(false)
   const [sweepPlan, setSweepPlan] = useState<SweepPlan | null>(null)
   const [sweepLoading, setSweepLoading] = useState(false)
   const [sweepResult, setSweepResult] = useState<SweepSummary | null>(null)
+  const [sweepProgress, setSweepProgress] = useState<SweepSummary>({ moved: 0, duplicates: 0, skipped: 0, failed: 0 })
+  const [approvingDestination, setApprovingDestination] = useState<string | null>(null)
 
   // ── History modal ─────────────────────────────────────────────────────────────
   const [showHistoryModal, setShowHistoryModal] = useState(false)
@@ -288,71 +322,138 @@ export default function App() {
 
   // ── Tags ──────────────────────────────────────────────────────────────────────
   const [fileTags, setFileTags] = useState<Record<string, string>>({})
+  const [availableUpdate, setAvailableUpdate] = useState<Update | null>(null)
+  const [updateChecking, setUpdateChecking] = useState(false)
+  const [updateInstalling, setUpdateInstalling] = useState(false)
+  const [updateMessage, setUpdateMessage] = useState('')
 
   // ─────────────────────────────────────────────────────────────────────────────
 
   const currentTab   = tabs[activeTab] || null
   const currentPath  = currentTab?.path ?? null
 
+  const notify = useCallback((msg: string) => {
+    setToast(msg)
+    window.setTimeout(() => setToast(''), 3200)
+  }, [])
+
+  const checkForUpdates = useCallback(async (silent = false) => {
+    setUpdateChecking(true)
+    setUpdateMessage('Checking for updates…')
+    try {
+      const update = await check()
+      setAvailableUpdate(update)
+      if (update) {
+        setUpdateMessage(`Version ${update.version} is ready to install.`)
+        if (!silent) notify(`Tally by Rayxworld ${update.version} is available.`)
+      } else {
+        setUpdateMessage('Tally by Rayxworld is up to date.')
+        if (!silent) notify('You are using the latest version.')
+      }
+    } catch (error) {
+      const message = `Update check failed: ${error}`
+      setUpdateMessage(message)
+      if (!silent) notify(message)
+    } finally {
+      setUpdateChecking(false)
+    }
+  }, [notify])
+
+  const installAvailableUpdate = useCallback(async () => {
+    if (!availableUpdate) return
+    setUpdateInstalling(true)
+    setUpdateMessage(`Downloading Tally by Rayxworld ${availableUpdate.version}…`)
+    try {
+      await availableUpdate.downloadAndInstall(event => {
+        if (event.event === 'Started' && event.data.contentLength) {
+          setUpdateMessage(`Downloading update (0/${Math.ceil(event.data.contentLength / 1024)} KB)…`)
+        }
+      })
+      setUpdateMessage('Update installed. Tally will restart to finish.')
+    } catch (error) {
+      const message = `Update installation failed: ${error}`
+      setUpdateMessage(message)
+      notify(message)
+    } finally {
+      setUpdateInstalling(false)
+    }
+  }, [availableUpdate, notify])
+
   // ── Init ─────────────────────────────────────────────────────────────────────
   useEffect(() => {
-    invoke<SpecialLocation[]>('get_special_locations').then(locs => {
+    const updateCheck = window.setTimeout(() => { void checkForUpdates(true) }, 0)
+    Promise.all([
+      invoke<SpecialLocation[]>('get_special_locations'),
+      invoke<string | null>('get_launch_folder'),
+    ]).then(([locs, launchFolder]) => {
       setSpecialLocations(locs)
       const home = locs.find(l => l.name === 'Home') || locs[0]
-      if (home) {
-        setTabs([{ path: home.path, name: home.name, history: [home.path], historyIndex: 0 }])
+      const initialPath = launchFolder || home?.path
+      if (initialPath) {
+        const initialName = locs.find(location => location.path === initialPath)?.name || basename(initialPath)
+        setTabs([{ path: initialPath, name: initialName, history: [initialPath], historyIndex: 0 }])
         setActiveTab(0)
       }
     }).catch(err => setLoadError(`Failed to init filesystem: ${err}`))
 
-    invoke<string[]>('get_watched_folders').then(setWatchedFolders).catch(() => {})
-    invoke<Record<string,string>>('get_file_tags').then(setFileTags).catch(() => {})
-  }, [])
+    invoke<string[]>('get_watched_folders').then(setWatchedFolders).catch(err => notify(`Cannot load watched folders: ${err}`))
+    invoke<Record<string,string>>('get_file_tags').then(setFileTags).catch(err => notify(`Cannot load file tags: ${err}`))
+    invoke<boolean>('get_windows_context_menu_enabled')
+      .then(setContextMenuEnabled)
+      .catch(err => notify(`Cannot read Explorer integration state: ${err}`))
+    return () => window.clearTimeout(updateCheck)
+  }, [checkForUpdates, notify])
 
   // ── Load directory ────────────────────────────────────────────────────────────
   useEffect(() => {
     if (!currentPath) return
-    setLoading(true)
-    setLoadError('')
-    setSelected([])
-    setContextMenu(null)
-    setPreviewData(null)
+    let active = true
+    void Promise.resolve().then(() => {
+      if (!active) return
+      setLoading(true)
+      setLoadError('')
+      setSelected([])
+      setContextMenu(null)
+      setPreviewData(null)
+      setPreviewLoading(false)
 
-    invoke<NativeDirectory>('list_directory', { path: currentPath })
-      .then(res => { setDirectory(res); setLoading(false) })
-      .catch(err => { setDirectory(null); setLoadError(String(err)); setLoading(false) })
+      return invoke<NativeDirectory>('list_directory', { path: currentPath })
+        .then(res => {
+          if (active) { setDirectory(res); setLoading(false) }
+        })
+        .catch(err => {
+          if (active) { setDirectory(null); setLoadError(String(err)); setLoading(false) }
+        })
+    })
+    return () => { active = false }
   }, [currentPath])
 
   // ── Preview on single selection ───────────────────────────────────────────────
   useEffect(() => {
-    if (selected.length !== 1) { setPreviewData(null); return }
-    const entry = directory?.entries.find(e => e.path === selected[0])
-    if (!entry || entry.is_dir) { setPreviewData(null); return }
-
-    setPreviewLoading(true)
-    invoke<FilePreview>('get_file_preview', { path: selected[0] })
-      .then(p => { setPreviewData(p); setPreviewLoading(false) })
-      .catch(() => { setPreviewData(null); setPreviewLoading(false) })
-  }, [selected, directory])
-
-  // ── Global Ctrl+K ─────────────────────────────────────────────────────────────
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
-        e.preventDefault()
-        setPaletteQuery('')
-        setShowPalette(p => !p)
-      }
-      if (e.key === 'Escape') {
-        setShowPalette(false)
-        setContextMenu(null)
-        setShowHelp(false)
-      }
-      if ((e.ctrlKey || e.metaKey) && e.key === '/') { e.preventDefault(); setShowHelp(true) }
+    let active = true
+    if (selected.length !== 1) {
+      void Promise.resolve().then(() => {
+        if (active) { setPreviewData(null); setPreviewLoading(false) }
+      })
+      return () => { active = false }
     }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [])
+    const entry = directory?.entries.find(e => e.path === selected[0])
+    if (!entry || entry.is_dir) {
+      void Promise.resolve().then(() => {
+        if (active) { setPreviewData(null); setPreviewLoading(false) }
+      })
+      return () => { active = false }
+    }
+
+    void Promise.resolve().then(() => {
+      if (!active) return
+      setPreviewLoading(true)
+      return invoke<FilePreview>('get_file_preview', { path: selected[0] })
+        .then(p => { if (active) { setPreviewData(p); setPreviewLoading(false) } })
+        .catch(() => { if (active) { setPreviewData(null); setPreviewLoading(false) } })
+    })
+    return () => { active = false }
+  }, [selected, directory])
 
   useEffect(() => {
     if (showPalette) setTimeout(() => paletteInputRef.current?.focus(), 20)
@@ -366,11 +467,6 @@ export default function App() {
   }, [])
 
   // ─── Helpers ──────────────────────────────────────────────────────────────────
-
-  function notify(msg: string) {
-    setToast(msg)
-    window.setTimeout(() => setToast(''), 3200)
-  }
 
   function navigateTo(path: string, customName?: string) {
     if (!currentTab) return
@@ -470,16 +566,38 @@ export default function App() {
   }
 
   function teachTally(item: FileItem) {
-    const extension = item.name.includes('.') ? `.${item.name.split('.').pop()}` : ''
+    teachFileType(item.name, item)
+  }
+
+  function teachFileType(name: string, item?: FileItem, resumeSweep = false) {
+    const extension = name.includes('.') ? `.${name.split('.').pop()}` : ''
     if (!extension) { notify('This file has no extension to teach Tally.'); return }
-    setRouteItem(item); setRouteDestination('{documents}/Other'); setRouteLabel('My file types')
+    setRouteItem(item ?? {
+      name, kind: 'other', modified: '—', size: '—', path: '', isDir: false,
+      bytes: 0, modifiedTimestamp: null,
+    })
+    setRouteDestination('{documents}/Other')
+    setRouteLabel('My file types')
+    setResumeSweepAfterTeach(resumeSweep)
   }
 
   function saveFileType() {
     if (!routeItem) return
     const extension = `.${routeItem.name.split('.').pop()}`
     invoke<Config>('assign_extension', { extension, destination: routeDestination, label: routeLabel })
-      .then(config => { setActiveConfig(config); notify(`Tally will now sort ${extension} files to ${routeDestination}`); setRouteItem(null) })
+      .then(config => {
+        setActiveConfig(config)
+        notify(`Tally will now sort ${extension} files to ${routeDestination}`)
+        setRouteItem(null)
+        if (resumeSweepAfterTeach) {
+          setShowSweepPanel(true)
+          setSweepLoading(true)
+          invoke<SweepPlan>('get_personal_tally_plan')
+            .then(plan => { setSweepPlan(plan); setSweepLoading(false) })
+            .catch(err => { notify(`Could not refresh organize preview: ${err}`); setSweepLoading(false) })
+        }
+        setResumeSweepAfterTeach(false)
+      })
       .catch(err => notify(`Could not save file type: ${err}`))
   }
 
@@ -501,23 +619,63 @@ export default function App() {
   // ─── Tally sweep ──────────────────────────────────────────────────────────────
 
   function openSweepPreview() {
-    if (!currentPath) return
-    setSweepLoading(true); setSweepResult(null); setShowSweepPanel(true)
-    invoke<SweepPlan>('get_tally_plan', { path: currentPath })
+    setSweepLoading(true)
+    setSweepPlan(null)
+    setSweepResult(null)
+    setSweepProgress({ moved: 0, duplicates: 0, skipped: 0, failed: 0 })
+    setShowSweepPanel(true)
+    invoke<SweepPlan>('get_personal_tally_plan')
       .then(plan => { setSweepPlan(plan); setSweepLoading(false) })
       .catch(err => { notify(`Cannot plan: ${err}`); setSweepLoading(false) })
   }
 
-  function runSweep() {
-    if (!currentPath) return
+  function approveSweepGroup(group: SweepGroup) {
+    if (approvingDestination) return
+    const moveCount = group.actions.length
+    if (!window.confirm(`Move ${moveCount} file${moveCount === 1 ? '' : 's'} into:\n${group.destination}\n\nOnly this destination group will be moved.`)) return
+
     setSweepLoading(true)
-    invoke<SweepSummary>('execute_tally_sweep', { path: currentPath })
+    setApprovingDestination(group.destination)
+    invoke<SweepSummary>('approve_personal_tally_group', {
+      groupDestination: group.destination,
+      approved: group.actions.map(action => ({ source: action.source, destination: action.destination })),
+    })
       .then(s => {
-        setSweepResult(s); setSweepLoading(false)
-        notify(`Sweep done: ${s.moved} moved, ${s.duplicates} duplicates preserved`)
+        const approvedSources = new Set(group.actions.map(action => action.source))
+        const remainingActions = (sweepPlan?.actions ?? []).filter(action => !approvedSources.has(action.source))
+        const finished = !remainingActions.some(action => action.kind === 'Move' || action.kind === 'Duplicate')
+        const nextProgress = {
+          moved: sweepProgress.moved + s.moved,
+          duplicates: sweepProgress.duplicates + s.duplicates,
+          skipped: sweepPlan?.summary.skipped ?? 0,
+          failed: sweepProgress.failed + s.failed,
+        }
+        setSweepProgress(nextProgress)
+        setSweepResult(finished ? {
+          ...nextProgress,
+          failed: nextProgress.failed + (sweepPlan?.summary.failed ?? 0),
+        } : null)
+        setSweepPlan(current => current ? {
+          ...current,
+          actions: current.actions.filter(action => !approvedSources.has(action.source)),
+          summary: {
+            ...current.summary,
+            moved: Math.max(0, current.summary.moved - s.moved),
+            duplicates: Math.max(0, current.summary.duplicates - s.duplicates),
+          },
+        } : current)
+        setSweepLoading(false)
+        notify(`${group.destination}: ${s.moved} moved, ${s.duplicates} duplicates preserved`)
         refresh()
       })
-      .catch(err => { notify(`Sweep failed: ${err}`); setSweepLoading(false) })
+      .catch(err => {
+        notify(`Could not approve this group: ${err}`)
+        invoke<SweepPlan>('get_personal_tally_plan')
+          .then(plan => setSweepPlan(plan))
+          .catch(refreshError => notify(`Could not refresh scan: ${refreshError}`))
+          .finally(() => setSweepLoading(false))
+      })
+      .finally(() => setApprovingDestination(null))
   }
 
   function handleUndo(count = 1) {
@@ -595,6 +753,10 @@ export default function App() {
 
   function openBatchRename() {
     if (selected.length < 2) { notify('Select 2 or more files to batch rename'); return }
+    if (selected.some(path => directory?.entries.find(entry => entry.path === path)?.is_dir)) {
+      notify('Batch rename works with files only. Remove folders from your selection.')
+      return
+    }
     const items = selected.map(p => ({ from: p, name: basename(p), to: basename(p) }))
     setRenameItems(items)
     setRenamePrefix(''); setRenameSuffix(''); setRenameFindVal(''); setRenameReplaceVal(''); setRenameNumberStart('')
@@ -619,7 +781,25 @@ export default function App() {
     })
   }, [renameItems, renamePrefix, renameSuffix, renameFindVal, renameReplaceVal, renameNumberStart])
 
+  const renameError = (() => {
+    if (renameNumberStart !== '' && !/^\d+$/.test(renameNumberStart)) {
+      return 'Number from must be a non-negative whole number.'
+    }
+    if (renameNumberStart !== '' && !Number.isSafeInteger(Number(renameNumberStart))) {
+      return 'Number from is too large.'
+    }
+    if (renamePreview.some(name => !isSafeFileName(name))) {
+      return 'A generated name contains characters that Windows cannot use in a file name.'
+    }
+    const normalizedNames = renamePreview.map(name => name.toLocaleLowerCase())
+    if (new Set(normalizedNames).size !== normalizedNames.length) {
+      return 'Two or more files would have the same new name.'
+    }
+    return ''
+  })()
+
   function applyBatchRename() {
+    if (renameError) { notify(renameError); return }
     const payload = renameItems.map((item, idx) => ({ from: item.from, to_name: renamePreview[idx] }))
     invoke<number>('batch_rename', { items: payload })
       .then(n => {
@@ -644,10 +824,79 @@ export default function App() {
       .catch(err => notify(`Tag error: ${err}`))
   }
 
+  const keyboardActions = useRef({ openNewTab, goBack, goForward, goUp, refresh })
+  const nativeDropActions = useRef({ navigateTo, notify })
+
+  useEffect(() => {
+    keyboardActions.current = { openNewTab, goBack, goForward, goUp, refresh }
+    nativeDropActions.current = { navigateTo, notify }
+  })
+
+  // ── Global keyboard shortcuts ─────────────────────────────────────────────────
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const target = e.target
+      const editing = target instanceof HTMLElement &&
+        (target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName))
+      const modifier = e.ctrlKey || e.metaKey
+      if (modifier && e.key.toLowerCase() === 'k') {
+        e.preventDefault()
+        setPaletteQuery('')
+        setShowPalette(p => !p)
+      }
+      if (e.key === 'Escape') {
+        setShowPalette(false)
+        setContextMenu(null)
+        setShowHelp(false)
+      }
+      if (modifier && e.key === '/') { e.preventDefault(); setShowHelp(true) }
+      if (editing) return
+      if (modifier && e.key.toLowerCase() === 't') { e.preventDefault(); keyboardActions.current.openNewTab() }
+      if (e.altKey && e.key === 'ArrowLeft') { e.preventDefault(); keyboardActions.current.goBack() }
+      if (e.altKey && e.key === 'ArrowRight') { e.preventDefault(); keyboardActions.current.goForward() }
+      if (e.altKey && e.key === 'ArrowUp') { e.preventDefault(); keyboardActions.current.goUp() }
+      if (e.key === 'F5') { e.preventDefault(); keyboardActions.current.refresh() }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
+
+  useEffect(() => {
+    let active = true
+    let unlisten: (() => void) | undefined
+    getCurrentWindow().onDragDropEvent(event => {
+      if (event.payload.type === 'enter' || event.payload.type === 'over') {
+        setIsDraggingOver(true)
+        return
+      }
+      setIsDraggingOver(false)
+      if (event.payload.type !== 'drop') return
+
+      if (event.payload.paths.length !== 1) {
+        nativeDropActions.current.notify('Drop one folder at a time to open it safely.')
+        return
+      }
+      const path = event.payload.paths[0]
+      invoke<NativeDirectory>('list_directory', { path })
+        .then(() => {
+          nativeDropActions.current.navigateTo(path)
+          nativeDropActions.current.notify('Folder opened. Review the files, then choose Organize to preview changes.')
+        })
+        .catch(() => nativeDropActions.current.notify('Drop a folder to open it. Files are not moved by dropping them.'))
+    }).then(stopListening => {
+      if (active) unlisten = stopListening
+      else stopListening()
+    }).catch(err => nativeDropActions.current.notify(`File drop is unavailable: ${err}`))
+    return () => {
+      active = false
+      unlisten?.()
+    }
+  }, [])
+
   // ─── Command palette actions ───────────────────────────────────────────────────
 
-  const paletteActions = useCallback((): PaletteAction[] => [
-    { id: 'organize', label: 'Organize Folder', description: 'Run Tally sweep on current folder', run: () => { setShowPalette(false); openSweepPreview() } },
+  const paletteActions: PaletteAction[] = [
+    { id: 'organize', label: 'Scan Personal Folders', description: 'Review recursive scan results and approve each destination', run: () => { setShowPalette(false); openSweepPreview() } },
     { id: 'undo', label: 'Undo Last Sweep', description: 'Revert the most recent organization', run: () => { setShowPalette(false); handleUndo(1) } },
     { id: 'history', label: 'View History', description: 'Browse organization sessions', run: () => { setShowPalette(false); openHistory() } },
     { id: 'dupes', label: 'Find Duplicates', description: 'Scan for duplicate files in this folder', run: () => { setShowPalette(false); openDupeScanner() } },
@@ -666,15 +915,15 @@ export default function App() {
       description: loc.path,
       run: () => { setShowPalette(false); navigateTo(loc.path, loc.name) },
     })),
-  ], [watchedFolders, currentPath, dark, specialLocations])
+  ]
 
-  const filteredPaletteActions = useMemo(() => {
+  const filteredPaletteActions = (() => {
     const q = paletteQuery.trim().toLowerCase()
-    if (!q) return paletteActions()
-    return paletteActions().filter(a =>
+    if (!q) return paletteActions
+    return paletteActions.filter(a =>
       a.label.toLowerCase().includes(q) || (a.description ?? '').toLowerCase().includes(q)
     )
-  }, [paletteQuery, paletteActions])
+  })()
 
   // ─── Derived file list ────────────────────────────────────────────────────────
 
@@ -702,7 +951,7 @@ export default function App() {
     archives:  allFiles.filter(f => f.kind === 'archive').length,
   }), [allFiles])
 
-  const filteredFiles = useMemo(() => {
+  const filteredFiles = (() => {
     let r = [...allFiles]
     if (categoryFilter !== 'all') {
       if (categoryFilter === 'folders') r = r.filter(f => f.isDir)
@@ -723,7 +972,7 @@ export default function App() {
       return sortAsc ? c : -c
     })
     return r
-  }, [allFiles, categoryFilter, query, sortBy, sortAsc])
+  })()
 
   const breadcrumbs = useMemo(() => {
     if (!currentPath) return []
@@ -743,9 +992,6 @@ export default function App() {
   return (
     <div
       className={`tally-app ${dark ? 'theme-dark' : 'theme-light'}`}
-      onDragOver={e => { e.preventDefault(); setIsDraggingOver(true) }}
-      onDragLeave={e => { if (e.clientX <= 0 || e.clientY <= 0) setIsDraggingOver(false) }}
-      onDrop={e => { e.preventDefault(); setIsDraggingOver(false); openSweepPreview() }}
     >
       {/* ── Title bar & tabs ──────────────────────────────────────────────────── */}
       <header className="titlebar">
@@ -833,8 +1079,8 @@ export default function App() {
       {/* ── Command toolbar ────────────────────────────────────────────────────── */}
       <div className="command-bar">
         <div className="command-group">
-          <button className="command-btn tally-primary-btn" onClick={openSweepPreview} title="Organize folder with Tally">
-            <Sparkles size={14} /><span>Organize</span>
+          <button className="command-btn tally-primary-btn" onClick={openSweepPreview} title="Scan your personal folders and review moves by destination">
+            <Sparkles size={14} /><span>Scan &amp; Organize</span>
           </button>
           <button className="command-btn" onClick={() => handleUndo(1)} title="Undo last sweep">
             <Undo2 size={14} /><span>Undo</span>
@@ -1088,7 +1334,7 @@ export default function App() {
         <span className="status-item">{filteredFiles.length} item{filteredFiles.length !== 1 ? 's' : ''}</span>
         {selected.length > 0 && <span className="status-item">{selected.length} selected</span>}
         <span className="status-spacer" />
-        <span className="status-item">{isWatched ? '⚡ Auto-clean active' : 'Tally v1.0.0'}</span>
+        <span className="status-item">{isWatched ? '⚡ Auto-clean active' : 'Tally by Rayxworld'}</span>
       </footer>
 
       {/* ── Drag & drop overlay ────────────────────────────────────────────────── */}
@@ -1096,8 +1342,8 @@ export default function App() {
         <div className="dropzone-overlay">
           <div className="dropzone-box">
             <Sparkles size={44} className="dropzone-icon" />
-            <h2>Drop to Organize</h2>
-            <p>Tally will sort these files safely into configured destinations.</p>
+            <h2>Drop a folder to open it</h2>
+            <p>Review its contents, then choose Organize to preview changes. Dropped files are never moved automatically.</p>
           </div>
         </div>
       )}
@@ -1149,8 +1395,8 @@ export default function App() {
             <div className="modal-header"><div className="modal-header-title"><CircleHelp size={17} /><h2>Welcome to Tally</h2></div><button className="icon-button" onClick={() => setShowHelp(false)}><X size={15} /></button></div>
             <div className="modal-body">
               <p className="modal-subtitle">Tally keeps Downloads and Desktop under control. It previews every organization action and records moves so you can undo them.</p>
-              <div className="settings-section"><h4>Start here</h4><p className="setting-desc">Open a folder, select <strong>Organize</strong>, review the plan, then confirm. Use <strong>Teach Tally this type</strong> on an unfamiliar file to save where it belongs.</p></div>
-              <div className="settings-section"><h4>Shortcuts</h4><div className="rules-table"><div className="rule-row"><strong>Ctrl + K</strong><span className="rule-dest">Command Palette</span></div><div className="rule-row"><strong>Ctrl + /</strong><span className="rule-dest">Help &amp; Shortcuts</span></div><div className="rule-row"><strong>Esc</strong><span className="rule-dest">Close menus and dialogs</span></div><div className="rule-row"><strong>Ctrl + click</strong><span className="rule-dest">Add or remove selection</span></div><div className="rule-row"><strong>Shift + click</strong><span className="rule-dest">Select a file range</span></div></div></div>
+              <div className="settings-section"><h4>Start here</h4><p className="setting-desc">Select <strong>Scan &amp; Organize</strong> to review supported files from your standard personal folders. Approve each destination group separately. Use <strong>Teach Tally this type</strong> on an unfamiliar file to add a routing rule.</p></div>
+              <div className="settings-section"><h4>Shortcuts</h4><div className="rules-table"><div className="rule-row"><strong>Ctrl + K</strong><span className="rule-dest">Command Palette</span></div><div className="rule-row"><strong>Ctrl + /</strong><span className="rule-dest">Help &amp; Shortcuts</span></div><div className="rule-row"><strong>Ctrl + T</strong><span className="rule-dest">New tab</span></div><div className="rule-row"><strong>Alt + ← / →</strong><span className="rule-dest">Back / forward</span></div><div className="rule-row"><strong>Alt + ↑</strong><span className="rule-dest">Open parent folder</span></div><div className="rule-row"><strong>F5</strong><span className="rule-dest">Refresh folder</span></div><div className="rule-row"><strong>Esc</strong><span className="rule-dest">Close menus and dialogs</span></div><div className="rule-row"><strong>Ctrl + click</strong><span className="rule-dest">Add or remove selection</span></div><div className="rule-row"><strong>Shift + click</strong><span className="rule-dest">Select a file range</span></div></div></div>
               <div className="settings-section"><h4>Safety promise</h4><p className="setting-desc">Tally does not overwrite or delete files when it organizes. Clone moves and batch renames are available in History for rollback.</p></div>
             </div>
             <div className="modal-footer"><button className="primary-button" onClick={() => setShowHelp(false)}>Got it</button></div>
@@ -1196,11 +1442,11 @@ export default function App() {
         <div className="modal-backdrop" onClick={() => setShowSweepPanel(false)}>
           <div className="modal-container sweep-modal" onClick={e => e.stopPropagation()}>
             <div className="modal-header">
-              <div className="modal-header-title"><Sparkles size={17} className="sparkle-icon" /><h2>Organize Folder</h2></div>
+              <div className="modal-header-title"><Sparkles size={17} className="sparkle-icon" /><h2>Organize Personal Folders</h2></div>
               <button className="icon-button" onClick={() => setShowSweepPanel(false)}><X size={15} /></button>
             </div>
             <div className="modal-body">
-              <p className="modal-subtitle">Tally will sort top-level files in <strong>{currentTab?.name}</strong> by type and date. Sub-folders are never moved. Every action is undoable.</p>
+              <p className="modal-subtitle">Scans Desktop, Downloads, Documents, Pictures, Videos, and Music, including subfolders. Tally never scans the whole drive, follows links, or enters protected system and detected project folders. Review each destination group; nothing moves until you approve that group.</p>
               {sweepLoading && <div className="loading-spinner">Analysing…</div>}
               {sweepPlan?.warning && <div className="warning-banner"><AlertCircle size={16} /><span>{sweepPlan.warning}</span></div>}
               {sweepPlan && !sweepPlan.warning && !sweepResult && (
@@ -1208,35 +1454,97 @@ export default function App() {
                   <div className="sweep-stats-grid">
                     <div className="stat-card"><span className="stat-number green">{sweepPlan.summary.moved}</span><span className="stat-label">To Move</span></div>
                     <div className="stat-card"><span className="stat-number amber">{sweepPlan.summary.duplicates}</span><span className="stat-label">Duplicates</span></div>
-                    <div className="stat-card"><span className="stat-number muted">{sweepPlan.summary.skipped}</span><span className="stat-label">Skipped</span></div>
+                    <div className="stat-card"><span className="stat-number muted">{sweepPlan.summary.skipped}</span><span className="stat-label">Skipped items</span></div>
+                    <div className="stat-card"><span className="stat-number amber">{sweepPlan.summary.failed}</span><span className="stat-label">Scan errors</span></div>
                   </div>
                   <div className="plan-list-wrapper">
-                    <h4>Planned operations</h4>
-                    <div className="plan-list">
-                      {sweepPlan.actions.filter(a => a.kind === 'Move' || a.kind === 'Duplicate').map((a, i) => (
-                        <div key={i} className="plan-row">
-                          <span className={`plan-badge ${a.kind.toLowerCase()}`}>{a.kind === 'Duplicate' ? 'COPY' : 'MOVE'}</span>
-                          <div className="plan-names">
-                            <strong>{basename(a.source)}</strong>
-                            <span className="plan-dest">→ {a.destination ? basename(a.destination) : ''}</span>
+                    <h4>Review and approve by destination</h4>
+                    <div className="destination-groups">
+                      {groupSweepActions(sweepPlan.actions).map(group => (
+                        <section key={group.destination} className="destination-group">
+                          <div className="destination-group-header">
+                            <strong title={group.destination}>{group.destination}</strong>
+                            <span>{group.actions.length} file{group.actions.length === 1 ? '' : 's'}</span>
                           </div>
-                          <span className="plan-rule">{a.rule_name || a.reason}</span>
-                        </div>
+                          <div className="destination-group-files">
+                            {group.actions.map(action => (
+                              <div key={action.source} className="destination-file-row">
+                                <span className={`plan-badge ${action.kind.toLowerCase()}`}>{action.kind === 'Duplicate' ? 'COPY' : 'MOVE'}</span>
+                                <div className="destination-file-paths">
+                                  <strong title={action.source}>{action.source}</strong>
+                                  <span title={action.destination}>→ {action.destination}</span>
+                                </div>
+                                <span className="plan-rule">{action.rule_name || action.reason}</span>
+                              </div>
+                            ))}
+                          </div>
+                          <button
+                            className="primary-button destination-approve-button"
+                            disabled={sweepLoading || approvingDestination !== null}
+                            onClick={() => approveSweepGroup(group)}
+                          >
+                            {approvingDestination === group.destination ? 'Moving…' : `Approve & move ${group.actions.length}`}
+                          </button>
+                        </section>
                       ))}
-                      {sweepPlan.summary.moved + sweepPlan.summary.duplicates === 0 && (
-                        <div className="no-plan-actions">No loose files eligible for sorting.</div>
+                      {groupSweepActions(sweepPlan.actions).length === 0 && (
+                        <div className="no-plan-actions">No supported files need organizing. Expand the skipped list to see what Tally left untouched.</div>
                       )}
                     </div>
                   </div>
+                  {sweepPlan.summary.skipped > 0 && (
+                    <details className="skipped-list-wrapper" open={sweepPlan.summary.moved + sweepPlan.summary.duplicates === 0}>
+                      <summary>Skipped files and folders ({sweepPlan.summary.skipped}) — see why</summary>
+                      <div className="plan-list skipped-plan-list">
+                        {sweepPlan.actions.filter(a => a.kind === 'Skip').slice(0, 100).map((a, i) => (
+                          <div key={`${a.source}-${i}`} className="skipped-plan-row">
+                            <div className="skipped-plan-file">
+                              <strong title={basename(a.source)}>{basename(a.source)}</strong>
+                              <span>{a.reason}</span>
+                            </div>
+                            {a.reason === 'no rule for this file type' && !a.source.endsWith('\\') && !a.source.endsWith('/') && (
+                              <button className="secondary-button skipped-teach-button" onClick={() => {
+                                setShowSweepPanel(false)
+                                teachFileType(basename(a.source), undefined, true)
+                              }}>
+                                Add rule
+                              </button>
+                            )}
+                          </div>
+                        ))}
+                        {sweepPlan.summary.skipped > 100 && (
+                          <div className="skipped-list-note">Showing the first 100 skipped files.</div>
+                        )}
+                      </div>
+                    </details>
+                  )}
+                  {sweepPlan.summary.failed > 0 && (
+                    <details className="skipped-list-wrapper">
+                      <summary>Scan errors ({sweepPlan.summary.failed})</summary>
+                      <div className="plan-list skipped-plan-list">
+                        {sweepPlan.actions.filter(a => a.kind === 'Failed').slice(0, 100).map((action, i) => (
+                          <div key={`${action.source}-${i}`} className="skipped-plan-row">
+                            <div className="skipped-plan-file">
+                              <strong title={action.source}>{action.source}</strong>
+                              <span>{action.reason}</span>
+                            </div>
+                          </div>
+                        ))}
+                        {sweepPlan.summary.failed > 100 && (
+                          <div className="skipped-list-note">Showing the first 100 scan errors.</div>
+                        )}
+                      </div>
+                    </details>
+                  )}
                 </>
               )}
               {sweepResult && (
                 <div className="sweep-success-view">
                   <div className="success-icon"><Check size={28} /></div>
                   <h3>Done</h3>
-                  <p>{sweepResult.moved} moved · {sweepResult.duplicates} duplicates preserved</p>
+                  <p>{sweepResult.moved} moved · {sweepResult.duplicates} duplicates preserved · {sweepResult.skipped} skipped · {sweepResult.failed} failed</p>
                   <div className="success-actions">
-                    <button className="secondary-button" onClick={() => { handleUndo(1); setShowSweepPanel(false) }}><Undo2 size={14} /> Undo</button>
+                    <button className="secondary-button" onClick={() => { handleUndo(1); setShowSweepPanel(false) }}><Undo2 size={14} /> Undo last destination</button>
                     <button className="primary-button"   onClick={() => setShowSweepPanel(false)}>Close</button>
                   </div>
                 </div>
@@ -1244,11 +1552,6 @@ export default function App() {
             </div>
             <div className="modal-footer">
               <button className="secondary-button" onClick={() => setShowSweepPanel(false)}>Cancel</button>
-              {sweepPlan && !sweepResult && (
-                <button className="primary-button" disabled={sweepPlan.summary.moved + sweepPlan.summary.duplicates === 0 || sweepLoading} onClick={runSweep}>
-                  <Sparkles size={14} /> Apply
-                </button>
-              )}
             </div>
           </div>
         </div>
@@ -1417,12 +1720,13 @@ export default function App() {
                   </div>
                 ))}
               </div>
+              {renameError && <p className="rename-validation-error" role="alert">{renameError}</p>}
             </div>
             <div className="modal-footer">
               <button className="secondary-button" onClick={() => setShowRenameModal(false)}>Cancel</button>
               <button
                 className="primary-button"
-                disabled={renamePreview.every((n, i) => n === renameItems[i].name)}
+                disabled={Boolean(renameError) || renamePreview.every((n, i) => n === renameItems[i].name)}
                 onClick={applyBatchRename}
               >
                 Rename {renameItems.length} files
@@ -1494,12 +1798,31 @@ export default function App() {
                 <h4>Windows Explorer Integration</h4>
                 <div className="setting-toggle-row">
                   <div>
-                    <strong>"Organize with Tally" context menu</strong>
-                    <p className="setting-desc">Right-click any folder in Explorer to quickly organize it with Tally.</p>
+                    <strong>"Open folder in Tally" context menu</strong>
+                    <p className="setting-desc">Right-click any folder in Explorer to browse it in Tally. Organize scans your standard personal folders after you review and approve destination groups.</p>
                   </div>
                   <button className={`toggle-switch-btn ${contextMenuEnabled ? 'active' : ''}`} onClick={toggleContextMenuIntegration}>
                     {contextMenuEnabled ? 'Enabled' : 'Disabled'}
                   </button>
+                </div>
+              </div>
+              <div className="settings-section">
+                <h4>About &amp; updates</h4>
+                <div className="setting-toggle-row">
+                  <div>
+                    <strong>Tally by Rayxworld</strong>
+                    <p className="setting-desc" role="status">{updateMessage || 'Signed updates keep Tally and the CLI current.'}</p>
+                    {availableUpdate?.body && <p className="setting-desc">{availableUpdate.body}</p>}
+                  </div>
+                  {availableUpdate ? (
+                    <button className="primary-button" onClick={installAvailableUpdate} disabled={updateInstalling}>
+                      {updateInstalling ? 'Installing…' : `Install ${availableUpdate.version}`}
+                    </button>
+                  ) : (
+                    <button className="secondary-button" onClick={() => void checkForUpdates()} disabled={updateChecking}>
+                      {updateChecking ? 'Checking…' : 'Check for updates'}
+                    </button>
+                  )}
                 </div>
               </div>
               <div className="settings-section">
